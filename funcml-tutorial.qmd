@@ -1,0 +1,1841 @@
+---
+title: |
+  A Tutorial on **funcml**: A Functional Machine Learning Framework for R
+author:
+  - name: Imad El Badisy
+    email: elbadisyimad@gmail.com
+date: today
+abstract: |
+  Machine learning workflows in R are frequently fragmented across incompatible
+  packages and object systems, creating cognitive overhead for both researchers
+  and practitioners. The **funcml** package addresses this fragmentation by
+  providing a deliberate, formula-first framework that unifies supervised
+  learning, resampling-based evaluation, hyperparameter tuning, learner
+  comparison, model-agnostic interpretation, and plug-in causal estimation
+  through six top-level verbs: `fit()`, `evaluate()`, `tune()`,
+  `compare_learners()`, `interpret()`, and `estimate()`. This tutorial
+  provides a comprehensive, self-contained introduction to **funcml** with
+  emphasis on the statistical theory and algorithmic foundations underlying
+  each component. For every learner in the registry---spanning generalized
+  linear models, regularized regression, tree-based methods, ensemble
+  methods, support vector machines, neural networks, additive models,
+  Bayesian trees, discriminant analysis, and ensemble aggregation---we
+  present the governing equations, key assumptions, and hyperparameter
+  landscape, followed by reproducible R code. We cover all fourteen
+  model-agnostic interpretability methods with theoretical motivation and
+  worked examples, and conclude with plug-in g-computation for average and
+  conditional treatment-effect estimation. The tutorial is designed to be
+  read progressively, with each section building on the preceding one.
+keywords:
+  - R package
+  - machine learning
+  - model interpretation
+  - explainable AI
+  - resampling
+  - hyperparameter tuning
+  - g-computation
+  - tutorial
+format:
+  html:
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc-title: "Contents"
+    number-sections: true
+    code-fold: false
+    code-tools: true
+    smooth-scroll: true
+    embed-resources: true
+    fig-align: center
+    fig-responsive: true
+  pdf:
+    number-sections: true
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    fig-pos: "htbp"
+    geometry:
+      - margin=1in
+    colorlinks: true
+    papersize: letter
+    fontsize: 11pt
+    include-in-header:
+      text: |
+        \usepackage{amsmath,amssymb,amsthm}
+        \usepackage{booktabs}
+        \usepackage{microtype}
+        \usepackage{xcolor}
+        \usepackage{algorithm}
+        \usepackage{algpseudocode}
+        \definecolor{funcmlblue}{HTML}{2C7BB6}
+        \newcommand{\pkg}[1]{\textbf{#1}}
+        \newcommand{\fct}[1]{\texttt{#1}}
+        \newcommand{\E}{\mathbb{E}}
+        \newcommand{\R}{\mathbb{R}}
+        \newcommand{\bx}{\mathbf{x}}
+        \newcommand{\by}{\mathbf{y}}
+        \newcommand{\bX}{\mathbf{X}}
+        \newcommand{\bbeta}{\boldsymbol{\beta}}
+bibliography: references.bib
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+editor: visual
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse  = TRUE,
+  comment   = "#>",
+  fig.width = 6,
+  fig.height = 4,
+  fig.align = "center",
+  out.width = "85%"
+)
+library(ggplot2)
+```
+
+# Introduction {#sec-intro}
+
+Supervised machine learning comprises a collection of algorithms that map feature matrices to responses: estimating a function $\hat{f}: \mathbb{R}^p \to \mathbb{R}$ (regression) or $\hat{f}: \mathbb{R}^p \to \{1,\ldots,K\}$ (classification) that generalises well to new data [@HastieEtAl2009]. Applied workflows inevitably involve more than a single fit-and-predict call. Practitioners need resampling-based performance estimation, hyperparameter search, multi-learner benchmarks, post-hoc interpretation, and increasingly links between predictive models and causal questions.
+
+In R, these tasks are scattered across multiple frameworks. `caret` [@Kuhn2008] standardised model fitting and resampling under one interface but has largely been superseded. `mlr3` [@Lang2019] provides a powerful object-oriented system based on R6 with a rich ecosystem of extensions. `tidymodels` [@tidymodels2019] integrates with the tidyverse and offers deep preprocessing support. `iml` [@Molnar2018] unifies model-agnostic interpretation. Each of these is excellent within its design space, but combining them across a single analysis requires navigating incompatible object systems and learning several different programming paradigms.
+
+The **funcml** package [@funcml_pkg] was built for a different point in the design space: a compact, formula-first framework that keeps machine learning close to native R modeling conventions while supporting the full applied workflow through a small number of stable verbs.
+
+::: callout-note
+## Design philosophy
+
+**funcml** is intentionally opinionated. Preprocessing---imputation, encoding, scaling---is expected to happen *before* any `funcml` call. The package provides modeling, not pipeline orchestration. This keeps the API surface small and function arguments transparent: every input to `fit()` or `evaluate()` is visible in the call.
+:::
+
+The interface revolves around six verbs (Table [-@tbl-verbs]), each returning a stable S3 object with consistent `print()`, `summary()`, and `plot()` methods.
+
+| Verb                 | Purpose                       | Returns           |
+|----------------------|-------------------------------|-------------------|
+| `fit()`              | Train a model                 | `funcml_fit`      |
+| `evaluate()`         | Resampling-based performance  | `funcml_eval`     |
+| `tune()`             | Hyperparameter search         | `funcml_tune`     |
+| `compare_learners()` | Multi-learner benchmarking    | `funcml_compare`  |
+| `interpret()`        | Model-agnostic interpretation | method-specific   |
+| `estimate()`         | Plug-in g-computation         | `funcml_estimand` |
+
+: Core **funcml** verbs and their return classes. {#tbl-verbs}
+
+This tutorial walks through each verb in order. @sec-install covers installation and introduces the running datasets. @sec-workflow gives a visual overview of the complete pipeline. @sec-resampling introduces resampling generators, which underpin evaluation, tuning, and comparison. @sec-learners presents all 23 learners with statistical foundations and R code. @sec-metrics covers the metric library. @sec-eval through @sec-compare demonstrate evaluation, tuning, and benchmarking. @sec-interpret covers all fourteen interpretation methods. @sec-estimate presents g-computation for causal effect estimation. @sec-e2e ties everything together in a single end-to-end example.
+
+**Notation.** Throughout, $n$ denotes sample size; $p$ the number of features; $\mathbf{x}_i = (x_{i1}, \ldots, x_{ip})^\top \in
+\mathbb{R}^p$ the feature vector of observation $i$; and $y_i$ the scalar response. $\mathbf{X} \in \mathbb{R}^{n \times p}$ denotes the full feature matrix and $\mathbf{y} \in \mathbb{R}^n$ the response vector. $\hat{f}$ always refers to the estimated prediction function.
+
+# Installation and Datasets {#sec-install}
+
+## Installation
+
+**funcml** is available from GitHub and can be installed with:
+
+```{r install, eval=FALSE}
+remotes::install_github("ielbadisy/funcml")
+```
+
+```{r load}
+library(funcml)
+```
+
+## Datasets
+
+**funcml** ships with fifteen curated datasets covering regression, binary classification, and multiclass classification. The full list can be inspected at any time:
+
+```{r dataset-list, eval=FALSE}
+data(package = "funcml")
+```
+
+Throughout this tutorial we use three representative datasets that together cover the three main supervised learning tasks.
+
+**Birthweight (regression).** The `birthweight` dataset [@HosmerLemeshow1989] contains 189 mother–infant pairs. The outcome is birth weight in grams (`birth_weight_g`); predictors include maternal age, pre-pregnancy weight, race, smoking status, and obstetric history.
+
+```{r data-reg}
+data_reg   <- birthweight
+formula_reg <- birth_weight_g ~ age + lwt + race + smoke + ptl + ht + ui + ftv
+dim(data_reg)
+```
+
+**Pima Diabetes (binary classification).** The `pimadiabetes` dataset [@Smith1988] contains 532 patients from the Pima Indian Diabetes Database. The outcome is a diabetes diagnosis indicator (`diabetes`; `"Yes"` / `"No"`). We use the pre-specified training partition and discard the split indicator.[^1]
+
+[^1]: The original Pima Indians dataset was collected by the National Institute of Diabetes and Digestive and Kidney Diseases. Only female patients aged at least 21 years were included.
+
+```{r data-cls}
+data_cls   <- pimadiabetes[pimadiabetes$split == "train", ]
+data_cls   <- data_cls[, setdiff(names(data_cls), "split")]
+formula_cls <- diabetes ~ npreg + glu + bp + skin + bmi + ped + age
+dim(data_cls)
+table(data_cls$diabetes)
+```
+
+**Thyroid Function (multiclass).** The `newthyroid` dataset contains 215 patients classified as normal (1), hyperthyroid (2), or hypothyroid (3) based on five thyroid laboratory measurements.
+
+```{r data-mc}
+data_mc   <- newthyroid
+data_mc$class <- factor(data_mc$class)
+formula_mc <- class ~ t3_resin_uptake + total_serum_thyroxin +
+  total_serum_triiodothyronine + basal_tsh + max_abs_tsh_diff
+dim(data_mc)
+table(data_mc$class)
+```
+
+With the package loaded and data prepared, we next describe how these pieces fit together into a coherent analysis pipeline.
+
+# The funcml Workflow {#sec-workflow}
+
+The **funcml** pipeline flows from raw data through a fitted model to performance assessment, interpretation, and causal estimation. Each stage corresponds to one of the six top-level verbs introduced in @sec-intro.
+
+```{r workflow-diagram, echo=FALSE, fig.cap="The complete funcml analysis pipeline. Arrows indicate data flow; every stage returns a structured S3 object that feeds the next.", fig.height=2.2, fig.width=8}
+stages <- data.frame(
+  x     = c(0.8, 2.5, 4.2, 5.9, 7.6, 9.3),
+  label = c("Data", "fit()", "evaluate()\ntune()", "compare_\nlearners()", "interpret()", "estimate()"),
+  type  = c("data", "core", "core", "core", "interp", "causal")
+)
+cols <- c(data = "#6baed6", core = "#2171b5", interp = "#238b45", causal = "#8c510a")
+
+ggplot(stages, aes(x, 0)) +
+  geom_tile(aes(fill = type), width = 1.35, height = 0.55, color = "white", linewidth = 1.2) +
+  geom_text(aes(label = label), size = 2.85, color = "white", fontface = "bold", lineheight = 0.88) +
+  annotate("segment",
+           x    = c(1.48, 3.18, 4.88, 6.58, 8.28),
+           xend = c(1.82, 3.52, 5.22, 6.92, 8.62),
+           y = 0, yend = 0,
+           arrow = arrow(length = unit(0.18, "cm"), type = "closed"),
+           color = "gray40", linewidth = 0.7) +
+  scale_fill_manual(values = cols) +
+  scale_y_continuous(limits = c(-0.5, 0.5)) +
+  scale_x_continuous(limits = c(0, 10.1)) +
+  theme_void() +
+  theme(legend.position = "none",
+        plot.margin = margin(4, 4, 4, 4))
+```
+
+The package follows a **preprocessing-outside** design: data passed to any `funcml` verb is exactly the data that will be modelled. There are no hidden transformations, no formula preprocessing pipelines, and no implicit encoding steps. This transparency is deliberate , it keeps the function arguments self-documenting and avoids hidden state that can cause silent errors between training and prediction.[^2]
+
+[^2]: Users who need graph-based preprocessing or formula-level feature engineering can combine `funcml` with base R helpers (e.g., `model.matrix()`, `scale()`) before passing data to `fit()`. Larger preprocessing ecosystems such as `mlr3pipelines` [@Binder2021] or `recipes` [@tidymodels2019] remain compatible with this approach.
+
+The learner registry and all available metrics and interpretation methods can be queried at runtime, making the package self-documenting:
+
+```{r registry}
+list_learners() |> head(8)
+```
+
+```{r metrics-list}
+list_metrics() |> head(8)
+```
+
+```{r interp-list}
+list_interpretability_methods()
+```
+
+The first concrete design choice in any analysis is how to partition the data for honest performance estimation. That is where the tutorial begins.
+
+# Resampling Strategies {#sec-resampling}
+
+## Theory
+
+Performance on training data is an optimistic estimate of generalisation performance because the model has already seen the training observations. The standard remedy is to hold out data during training, evaluate on the held-out portion, and repeat in a systematic way. Formally, given a dataset $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i=1}^n$, the goal is to estimate the expected prediction error:
+
+$$
+\text{Err} = \mathbb{E}_{(\mathbf{x}, y),\, \mathcal{D}}
+\bigl[L\!\bigl(y,\, \hat{f}_{\mathcal{D}}(\mathbf{x})\bigr)\bigr]
+$$
+
+where $L$ is a loss function and $\hat{f}_{\mathcal{D}}$ is the model trained on $\mathcal{D}$ [@HastieEtAl2009].
+
+$K$-fold cross-validation [@Stone1974] partitions $\mathcal{D}$ into $K$ folds of roughly equal size. The model is trained on $K-1$ folds and evaluated on the held-out fold, rotating until every observation has served as a validation observation exactly once:
+
+$$
+\widehat{\text{CV}}(K)
+= \frac{1}{n} \sum_{i=1}^n
+  L\!\bigl(y_i,\, \hat{f}^{-\kappa(i)}(\mathbf{x}_i)\bigr)
+$$
+
+where $\kappa(i)$ maps observation $i$ to its fold and $\hat{f}^{-\kappa(i)}$ is the model trained on all folds except $\kappa(i)$. Setting $K = n$ gives leave-one-out CV (LOO-CV).[^3] Common choices are $K = 5$ and $K = 10$.
+
+[^3]: LOO-CV is nearly unbiased for the true error but has high variance and is computationally expensive for large $n$. For most practical purposes, $K = 5$ or $K = 10$ offers a good bias-variance tradeoff [@HastieEtAl2009].
+
+**Holdout validation** reserves a fixed fraction $\pi \in (0, 1)$ of observations for testing. While computationally cheap, it is high-variance: performance depends heavily on the particular random split, especially when $n$ is small.
+
+**Grouped cross-validation** ensures that observations sharing a group identifier , patients, hospitals, geographic clusters , are never split across folds. Without this constraint, leakage between correlated observations produces optimistic estimates.
+
+**Time-series cross-validation** respects the temporal order of observations by expanding or rolling the training window. Fold $k$ trains on $\{1, \ldots, t_k\}$ and evaluates on $\{t_k+1, \ldots, t_k+h\}$ for an assessment horizon $h$, preventing future data from informing past predictions.
+
+```{r cv-diagram, echo=FALSE, fig.cap="Schematic of 5-fold cross-validation. Each row is one fold iteration: grey tiles are training observations, blue tiles are held-out validation observations.", fig.height=2.4, fig.width=6.5}
+n_obs  <- 20
+n_fold <- 5
+fold_id <- rep(1:n_fold, length.out = n_obs)
+df <- expand.grid(fold = 1:n_fold, obs = 1:n_obs)
+df$role <- ifelse(df$fold == df$obs %% n_fold + 1, "Validation", "Training")
+ggplot(df, aes(x = obs, y = fold, fill = role)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_manual(values = c(Training = "#bdc9e1", Validation = "#2171b5")) +
+  scale_y_reverse(breaks = 1:n_fold, labels = paste("Fold", 1:n_fold)) +
+  labs(x = "Observation index", y = NULL, fill = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom", panel.grid = element_blank())
+```
+
+## funcml Resampling Constructors
+
+All four strategies are created with dedicated constructors that return objects accepted by `evaluate()`, `tune()`, and `compare_learners()` without modification:
+
+```{r resampling-demo}
+cv5   <- cv(v = 5, seed = 42)              # 5-fold CV
+cv5r  <- cv(v = 5, repeats = 3, seed = 42) # repeated CV
+ho    <- holdout(prop = 0.8, seed = 42)    # 80/20 holdout
+# group_cv(v = 5, group = "patient_id")   # grouped CV
+# time_cv(initial = 50, assess = 10)      # time-series CV
+```
+
+::: callout-tip
+## Choosing a resampling strategy
+
+Use **5-fold CV** as the default. Increase to 10 folds when $n < 200$. Use **repeated CV** when you need low-variance estimates of confidence intervals. Use **grouped CV** whenever observations within a group are correlated (e.g., repeat measurements, clustered designs). Use **holdout** only when $n$ is large enough that a single split is stable (roughly $n > 2000$).
+:::
+
+With a resampling strategy in hand, we can now explore the learners available in the registry.
+
+# The Learner Registry {#sec-learners}
+
+## Overview
+
+The **funcml** registry contains 23 learners spanning ten algorithmic families (Table [-@tbl-registry]). All are accessed through a string identifier passed to `model =`. The registry is queryable and extensible: `list_learners()` returns a data frame of all learners with columns for task compatibility, probability output, multiclass support, native feature importance, and tunable hyperparameters.
+
+| Learner ID     | Algorithm                          | Task     | Engine       |
+|--------------|-----------------------------|--------------|--------------|
+| `glm`          | Generalised Linear Model           | Reg, Cls | stats        |
+| `glmnet`       | Elastic Net                        | Reg, Cls | glmnet       |
+| `pls`          | Partial Least Squares              | Reg      | pls          |
+| `rpart`        | CART Decision Tree                 | Reg, Cls | rpart        |
+| `ctree`        | Conditional Inference Tree         | Reg, Cls | partykit     |
+| `C50`          | C5.0 Tree                          | Cls      | C50          |
+| `ranger`       | Random Forest (fast)               | Reg, Cls | ranger       |
+| `randomForest` | Random Forest                      | Reg, Cls | randomForest |
+| `cforest`      | Conditional Forest                 | Reg, Cls | partykit     |
+| `gbm`          | Gradient Boosting                  | Reg, Cls | gbm          |
+| `xgboost`      | Extreme Gradient Boosting          | Reg, Cls | xgboost      |
+| `lightgbm`     | LightGBM                           | Reg, Cls | lightgbm     |
+| `adaboost`     | AdaBoost                           | Cls      | ada          |
+| `e1071_svm`    | Support Vector Machine             | Reg, Cls | e1071        |
+| `kknn`         | Weighted k-NN                      | Reg, Cls | kknn         |
+| `gam`          | Generalised Additive Model         | Reg, Cls | mgcv         |
+| `earth`        | MARS                               | Reg, Cls | earth        |
+| `bart`         | Bayesian Additive Regression Trees | Reg, Cls | dbarts       |
+| `naivebayes`   | Naive Bayes                        | Cls      | naivebayes   |
+| `lda`          | Linear Discriminant Analysis       | Cls      | MASS         |
+| `qda`          | Quadratic Discriminant Analysis    | Cls      | MASS         |
+| `fda`          | Flexible Discriminant Analysis     | Cls      | mda          |
+| `nnet`         | Single-Hidden-Layer Neural Network | Reg, Cls | nnet         |
+| `stacking`     | Stacked Ensemble                   | Reg, Cls | funcml       |
+| `superlearner` | SuperLearner Ensemble              | Reg, Cls | funcml       |
+
+: The **funcml** learner registry (Reg = regression, Cls = classification). {#tbl-registry}
+
+::: callout-note
+## The bias–variance tradeoff
+
+Every learner navigates a fundamental tradeoff. **Bias** is the systematic error from an overly simple model (underfitting). **Variance** is the sensitivity of predictions to fluctuations in the training set (overfitting). The expected prediction error decomposes as: $$
+\mathbb{E}\!\left[(y - \hat{f}(\mathbf{x}))^2\right]
+= \text{Bias}^2(\hat{f}) + \text{Var}(\hat{f}) + \sigma^2
+$$ where $\sigma^2$ is irreducible noise. Simple models (GLM, single tree) have high bias and low variance. Complex models (deep forests, boosting with many rounds) have low bias but high variance. Regularisation, pruning, and ensembling are strategies for controlling this tradeoff. Hyperparameter tuning (@sec-tuning) navigates the tradeoff empirically by selecting the configuration with the best cross-validated error.
+:::
+
+## Linear Models
+
+Linear models are the natural starting point: they are interpretable, computationally cheap, and well-understood statistically. Their coefficients are directly interpretable as marginal effects (on the link scale), and they provide baselines against which more complex learners should be compared.
+
+### Generalised Linear Models (`glm`)
+
+**Theory.** A generalised linear model [@HastieEtAl2009] links a conditional mean $\mu_i = \mathbb{E}[y_i \mid \mathbf{x}_i]$ to a linear predictor $\eta_i$ through a monotone differentiable *link function* $g$:
+
+$$
+g(\mu_i) = \eta_i
+= \beta_0 + \beta_1 x_{i1} + \cdots + \beta_p x_{ip}
+= \mathbf{x}_i^\top \boldsymbol{\beta}
+$$
+
+The response is assumed to follow an exponential family distribution. The three most common specifications are:
+
+| Task                  | Distribution | Link $g$ | $g(\mu)$                 |
+|-----------------------|--------------|----------|--------------------------|
+| Regression            | Gaussian     | Identity | $\mu$                    |
+| Binary classification | Binomial     | Logit    | $\log\tfrac{\mu}{1-\mu}$ |
+| Count regression      | Poisson      | Log      | $\log\mu$                |
+
+Parameters $\boldsymbol{\beta} \in \mathbb{R}^{p+1}$ are estimated by maximum likelihood via iteratively reweighted least squares (IRLS).[^4] In **funcml**, the GLM uses `family = "gaussian"` for regression and `family = "binomial"` for classification automatically based on the response type.
+
+[^4]: IRLS is equivalent to Newton–Raphson applied to the log-likelihood. Each iteration solves a weighted least squares problem with weights $W_{ii} = \mu_i'(η_i)^2 / V(\mu_i)$, where $V(\mu) = \text{Var}(Y \mid \mu)$ is the variance function of the exponential family.
+
+```{r glm-reg}
+fit_glm_reg <- fit(formula_reg, data = data_reg, model = "glm")
+fit_glm_reg
+```
+
+```{r glm-cls}
+fit_glm_cls <- fit(formula_cls, data = data_cls, model = "glm")
+predict(fit_glm_cls, newdata = data_cls[1:3, ], type = "prob")
+```
+
+### Elastic Net Regularisation (`glmnet`)
+
+**Theory.** Ordinary least squares overfits when $p$ is large or when predictors are correlated. The elastic net [@ZouHastie2005] adds a combined $\ell_1$/$\ell_2$ penalty to the loss:
+
+$$
+\hat{\boldsymbol{\beta}} = \arg\min_{\boldsymbol{\beta}}\left\{
+\frac{1}{n}\sum_{i=1}^n L(y_i, \eta_i)
++ \lambda\!\left[(1-\alpha)\frac{\|\boldsymbol{\beta}\|_2^2}{2}
+  + \alpha\|\boldsymbol{\beta}\|_1\right]
+\right\}
+$$
+
+The mixing parameter $\alpha \in [0, 1]$ controls the blend between ridge ($\alpha = 0$) and lasso ($\alpha = 1$) [@Tibshirani1996; @Friedman2010GLMNET]. The $\ell_2$ component handles correlated predictors gracefully , ridge regression distributes coefficients across a correlated group rather than arbitrarily zeroing some. The $\ell_1$ component induces sparsity , some coefficients are shrunk exactly to zero, performing variable selection. The intermediate elastic net inherits both properties.[^5] The regularisation path over $\lambda$ is computed efficiently by coordinate descent [@Friedman2010GLMNET].
+
+[^5]: The lasso solution is not unique when predictors are exactly collinear; the elastic net resolves this by adding a small ridge penalty. In practice, setting $\alpha$ between 0.5 and 0.9 often works well for moderately correlated predictors.
+
+**Key hyperparameters:** `alpha` (mixing, default 1 = lasso), `lambda` (shrinkage strength; cross-validated internally by default).
+
+```{r glmnet-reg}
+fit_glmnet <- fit(formula_reg, data = data_reg, model = "glmnet",
+                  spec = list(alpha = 0.5))
+fit_glmnet
+```
+
+### Partial Least Squares (`pls`)
+
+**Theory.** When $p > n$ or when predictors are highly collinear, even ridge regression may struggle. Partial least squares [@Wold1975; @Mevik2007] extracts a small number of latent components that simultaneously maximise the covariance between $\mathbf{X}$ and $\mathbf{y}$. The $k$-th component direction $\mathbf{w}_k$ solves:
+
+$$
+\mathbf{w}_k, \mathbf{q}_k
+= \arg\max_{\|\mathbf{w}\|=\|\mathbf{q}\|=1}
+  \operatorname{Cov}^2(\mathbf{X}\mathbf{w},\, \mathbf{y}\mathbf{q})
+$$
+
+subject to orthogonality with previous directions (NIPALS algorithm). Unlike principal component regression (PCR), which finds directions of maximum variance in $\mathbf{X}$ irrespective of $\mathbf{y}$, PLS finds directions that are most predictive of the response.
+
+**Key hyperparameter:** `ncomp` (number of latent components; typically selected by CV).
+
+```{r pls-reg}
+fit_pls <- fit(formula_reg, data = data_reg, model = "pls",
+               spec = list(ncomp = 3))
+fit_pls
+```
+
+## Decision Trees
+
+Decision trees trade interpretability for flexibility: each split corresponds to an if-then rule that can be stated in plain language. Single trees, however, have high variance , small changes in training data can produce very different tree structures. The ensemble methods in @sec-forests and @sec-boosting address this limitation.
+
+### CART Decision Trees (`rpart`)
+
+**Theory.** Classification and regression trees (CART) [@BreimanFriedmanOlshen1984] recursively partition $\mathbb{R}^p$ into hyper-rectangular regions. At each node, the algorithm finds the feature $j$ and split point $s$ that minimise the weighted impurity of the two child nodes:
+
+$$
+(j^*, s^*) = \arg\min_{j,\, s}
+\left[
+  \min_{c_L} \sum_{i:\, x_{ij} \le s} L(y_i, c_L)
++ \min_{c_R} \sum_{i:\, x_{ij} > s}  L(y_i, c_R)
+\right]
+$$
+
+For regression, $L(y, c) = (y - c)^2$ and the optimal leaf constant is the within-leaf mean. For classification, the most common split criteria are:
+
+*Gini impurity* , measures the probability that a randomly chosen observation is misclassified if its label is drawn from the leaf distribution: $$
+\text{Gini}(p_1, \ldots, p_K) = 1 - \sum_{k=1}^K p_k^2
+$$
+
+*Cross-entropy (deviance)* , the information-theoretic entropy of the leaf distribution: $$
+H(p_1, \ldots, p_K) = -\sum_{k=1}^K p_k \log p_k
+$$
+
+Both criteria reach zero for a pure leaf ($p_k = 1$ for some $k$) and are maximised for a uniform distribution. The tree is grown until a stopping criterion is met (minimum node size or maximum depth), then *pruned* by minimising the cost-complexity objective: $$
+R_\alpha(T) = R(T) + \alpha |T|
+$$ where $R(T)$ is resubstitution error, $|T|$ is the number of terminal nodes, and $\alpha \ge 0$ is the complexity parameter.[^6]
+
+[^6]: The cost-complexity parameter $\alpha$ (called `cp` in **rpart**) can be selected by CV. Large $\alpha$ produces small, high-bias trees; small $\alpha$ produces large, low-bias but high-variance trees.
+
+**Key hyperparameters:** `cp` (complexity, default 0.01), `minsplit` (minimum observations to attempt a split), `maxdepth`.
+
+```{r rpart-cls}
+fit_rpart <- fit(formula_cls, data = data_cls, model = "rpart",
+                 spec = list(cp = 0.01, minsplit = 10))
+fit_rpart
+```
+
+### Conditional Inference Trees (`ctree`)
+
+**Theory.** Standard CART suffers from *selection bias*: features with more possible split points (e.g., continuous variables or factors with many levels) are more likely to be selected even if they have no true association with the response [@Hothorn2006]. Conditional inference trees decouple variable *selection* from split *determination* using permutation tests.
+
+At each node, an association test is performed for each feature $X_j$ against the response $Y$. The feature with the smallest Bonferroni-adjusted $p$-value is selected:
+
+$$
+p_j^* = P\!\left(\sup_s |T(X_j, Y, s)| > t_{\text{obs}}\right)
+$$
+
+where $T$ is an appropriate linear test statistic derived from conditional distributions. A split is performed only if $\min_j p_j^* < \alpha_{\text{split}}$; otherwise the node becomes a leaf. This approach is unbiased toward any specific type of predictor and provides a principled stopping criterion.
+
+**Key hyperparameter:** `mincriterion` ($1 - \alpha_{\text{split}}$; higher values produce smaller trees).
+
+```{r ctree-cls}
+fit_ctree <- fit(formula_cls, data = data_cls, model = "ctree",
+                 spec = list(mincriterion = 0.95))
+fit_ctree
+```
+
+### C5.0 Decision Trees (`C50`)
+
+**Theory.** C5.0 [@Quinlan1993] is the commercial successor to C4.5 and ID3. Instead of Gini impurity, C5.0 selects the split feature by maximising the *gain ratio*, which normalises information gain by the entropy of the split itself:
+
+$$
+\text{GainRatio}(X_j)
+= \frac{H(Y) - H(Y \mid X_j)}{H(X_j)}
+$$
+
+The denominator $H(X_j) = -\sum_v p(X_j = v)\log p(X_j = v)$ penalises features that create many small branches (e.g., a unique-ID feature would have maximum information gain but minimal gain ratio). C5.0 also natively supports *boosting* by sequentially fitting weighted trees.
+
+**Key hyperparameters:** `trials` (boosting rounds; 1 = single tree), `minCases` (minimum observations per leaf).
+
+```{r C50-cls}
+fit_C50 <- fit(formula_cls, data = data_cls, model = "C50",
+               spec = list(trials = 1))
+fit_C50
+```
+
+## Random Forests {#sec-forests}
+
+Single decision trees are interpretable but unstable. The two random forest variants in **funcml** address this by combining many trees grown on resampled versions of the data, reducing variance while preserving the low bias of individual deep trees.
+
+### Random Forests (`ranger`, `randomForest`)
+
+**Theory.** Random forests [@Breiman2001] combine bootstrap aggregation (bagging [@Breiman1996Bagging]) with random subspace sampling. Given $B$ bootstrap datasets $\mathcal{D}^{*(b)}$, each tree $\hat{f}^{(b)}$ is grown using only a random subset of $m \le p$ candidate features at each node. The ensemble averages:
+
+$$
+\hat{f}_{\text{RF}}(\mathbf{x})
+= \frac{1}{B}\sum_{b=1}^B \hat{f}^{(b)}(\mathbf{x})
+\quad (\text{regression})
+$$ $$
+\hat{f}_{\text{RF}}(\mathbf{x})
+= \arg\max_k \sum_{b=1}^B
+  \mathbf{1}\!\left[\hat{f}^{(b)}(\mathbf{x}) = k\right]
+\quad (\text{classification, majority vote})
+$$
+
+Random feature sampling decorrelates the trees: if a few very strong predictors exist, every tree would otherwise split on them first, producing correlated predictions. Decorrelated trees reduce the ensemble variance without increasing individual tree bias.
+
+The *out-of-bag* (OOB) error provides a free, nearly unbiased estimate of generalisation error: each observation is predicted only by trees for which it was *not* in the bootstrap sample ($\approx 1/e \approx 37\%$ of trees).[^7]
+
+[^7]: The OOB error is comparable to a leave-one-out estimate and typically agrees closely with 10-fold CV at a fraction of the computation. However, OOB estimates can be slightly optimistic for small forests.
+
+Breiman's *mean-decrease impurity* (MDI) importance for feature $j$ sums the weighted impurity reduction across all splits on $j$ across all trees: $$
+\text{MDI}(j)
+= \frac{1}{B}\sum_{b=1}^B \sum_{t \in \mathcal{T}^{(b)}_j}
+  \frac{n_t}{n}\,\Delta\text{Impurity}(t)
+$$
+
+Standard default: $m = \lfloor\sqrt{p}\rfloor$ for classification, $m = \lfloor p/3 \rfloor$ for regression.[^8]
+
+[^8]: MDI importance is biased toward predictors with many unique values [@Strobl2007]. The conditional importance in `cforest` (below) or permutation importance (Section 10.2) provide unbiased alternatives.
+
+**Key hyperparameters:** `num.trees` / `ntree` (forest size; larger is better but with diminishing returns), `mtry` (features per split), `min.node.size`.
+
+```{r ranger-reg}
+fit_ranger <- fit(formula_reg, data = data_reg, model = "ranger",
+                  spec = list(num.trees = 300, mtry = 3, seed = 42))
+fit_ranger
+```
+
+```{r rf-cls}
+fit_rf <- fit(formula_cls, data = data_cls, model = "randomForest",
+              spec = list(ntree = 300, mtry = 3))
+fit_rf
+```
+
+### Conditional Forest (`cforest`)
+
+**Theory.** Conditional forests [@Strobl2007; @Strobl2008] replace the CART base learner in random forests with unbiased conditional inference trees (Section 5.2.2). Each split in each tree is selected by a permutation test rather than by impurity maximisation, preventing bias toward predictors with many categories or continuous scales.
+
+The conditional permutation importance for feature $j$ measures the drop in performance when $j$ is permuted *within* blocks defined by other correlated features, thereby controlling for feature associations:
+
+$$
+\text{CPI}(j)
+= \mathbb{E}\!\left[
+    L(y, \hat{f}(\mathbf{x}))
+  - L(y, \hat{f}(\mathbf{x}_j^{\pi}))
+  \right]
+$$
+
+where $\mathbf{x}_j^{\pi}$ replaces $x_j$ with a permuted value drawn from observations with similar values of correlated features. This removes the spurious importance inflation that unconditioned permutation importance assigns to correlated predictors [@Strobl2008].
+
+```{r cforest-cls}
+fit_cforest <- fit(formula_cls, data = data_cls, model = "cforest",
+                   spec = list(ntree = 100))
+fit_cforest
+```
+
+## Ensemble Methods: Boosting {#sec-boosting}
+
+Boosting builds an ensemble *sequentially*, with each new learner correcting the errors of the previous ensemble. This contrasts with bagging, which builds trees in parallel on independent bootstrap samples.
+
+### Gradient Boosting Machines (`gbm`)
+
+**Theory.** Gradient boosting [@Friedman2001] fits an additive model $\hat{F}(\mathbf{x}) = \sum_{m=0}^M \nu h_m(\mathbf{x})$ by functional gradient descent. At each stage $m$, a base learner $h_m$ (usually a shallow decision tree) is fit to the *negative gradient* of the loss , the pseudo-residuals:
+
+$$
+r_{im}
+= -\left[\frac{\partial L(y_i, F(\mathbf{x}_i))}
+              {\partial F(\mathbf{x}_i)}
+  \right]_{F = \hat{F}_{m-1}}
+$$
+
+For squared-error loss, the pseudo-residuals are simply the ordinary residuals $y_i - \hat{F}_{m-1}(\mathbf{x}_i)$, so gradient boosting with MSE loss is equivalent to iterative residual fitting. For log-loss, the pseudo-residuals are $y_i - p_{m-1}(\mathbf{x}_i)$, where $p_{m-1}$ is the current predicted probability.
+
+The shrinkage factor $\nu \in (0, 1)$ (learning rate) scales each tree's contribution. Small $\nu$ requires more trees but often achieves better generalisation.[^9]
+
+[^9]: A useful practical heuristic: use the largest number of trees that does not cause overfitting on a validation set, with a small learning rate ($\nu \in [0.01, 0.1]$). Typical values are 100–2000 trees with $\nu = 0.05$.
+
+**Key hyperparameters:** `n.trees`, `interaction.depth` (tree depth, default 1 = stumps), `shrinkage` (learning rate), `n.minobsinnode`.
+
+```{r gbm-reg}
+fit_gbm <- fit(formula_reg, data = data_reg, model = "gbm",
+               spec = list(n.trees = 200, interaction.depth = 3,
+                           shrinkage = 0.05, n.minobsinnode = 5))
+fit_gbm
+```
+
+### Extreme Gradient Boosting (`xgboost`)
+
+**Theory.** XGBoost [@ChenGuestrin2016] extends gradient boosting with regularisation and an efficient second-order Taylor approximation of the loss. At iteration $m$, the optimal tree structure $q$ maximises:
+
+$$
+\tilde{\mathcal{L}}^{(m)}(q)
+= -\frac{1}{2}\sum_{\ell=1}^{|T|}
+  \frac{\left(\sum_{i \in I_\ell} g_i\right)^2}
+       {\sum_{i \in I_\ell} h_i + \lambda}
++ \gamma |T|
+$$
+
+where $g_i = \partial_{\hat{y}} L(y_i, \hat{y})$ and $h_i = \partial^2_{\hat{y}} L(y_i, \hat{y})$ are the first and second gradient statistics, $I_\ell$ is the set of observations at leaf $\ell$, $\lambda$ controls $\ell_2$ leaf weight regularisation, and $\gamma$ is the minimum loss reduction required for a split. Using second-order information accelerates convergence and enables more aggressive regularisation than first-order methods. XGBoost also supports column and row subsampling.
+
+**Key hyperparameters:** `nrounds`, `max_depth`, `eta` (learning rate), `subsample`, `colsample_bytree`, `lambda`, `alpha`.
+
+```{r xgboost-reg}
+fit_xgb <- fit(formula_reg, data = data_reg, model = "xgboost",
+               spec = list(nrounds = 200, max_depth = 4, eta = 0.05,
+                           subsample = 0.8))
+fit_xgb
+```
+
+### LightGBM (`lightgbm`)
+
+**Theory.** LightGBM [@Ke2017] achieves high speed and memory efficiency through two algorithmic innovations beyond standard gradient boosting.
+
+*Gradient-based One-Side Sampling (GOSS)* retains all observations with large gradients (informative data points) and randomly downsamples those with small gradients. The missing gradient mass is compensated by a factor $(1-a)/b$ during histogram construction, where $a$ is the top-gradient fraction retained and $b$ the fraction sampled from the low-gradient group.
+
+*Exclusive Feature Bundling (EFB)* identifies mutually exclusive sparse features , features that are rarely non-zero simultaneously , and bundles them into a single dense feature. This reduces the effective number of features without information loss.
+
+Additionally, LightGBM grows trees *leaf-wise* (best-first) rather than level-wise: at each step it splits the leaf with the greatest loss reduction regardless of tree depth. This produces asymmetric trees that can capture complex patterns more efficiently than level-wise growth, but requires careful regularisation to avoid overfitting.[^10]
+
+[^10]: Leaf-wise growth can overfit on small datasets. Use `min_child_samples` (minimum observations per leaf) and `max_depth` to regularise. For small datasets, level-wise growth (`num_leaves` close to 2) is safer.
+
+**Key hyperparameters:** `num_leaves`, `learning_rate`, `n_estimators`, `min_child_samples`, `feature_fraction`, `bagging_fraction`.
+
+```{r lightgbm-reg}
+fit_lgbm <- fit(formula_reg, data = data_reg, model = "lightgbm",
+                spec = list(num_leaves = 31, learning_rate = 0.05,
+                            n_estimators = 200))
+fit_lgbm
+```
+
+### AdaBoost (`adaboost`)
+
+**Theory.** AdaBoost [@FreundSchapire1997] is the foundational adaptive boosting algorithm for binary classification. It reweights training observations after each round, increasing the weight of misclassified examples so that subsequent weak learners focus on them. Let $y_i \in \{-1, +1\}$. Starting from uniform weights $w_i^{(1)} = 1/n$, each round $m$ proceeds:
+
+1.  Fit weak learner $h_m$ minimising weighted error: $\varepsilon_m = \sum_i w_i^{(m)} \mathbf{1}[h_m(\mathbf{x}_i) \neq y_i]$.
+
+2.  Compute learner weight: $\alpha_m = \tfrac{1}{2}\log\!\frac{1-\varepsilon_m}{\varepsilon_m}$.
+
+3.  Update and renormalise observation weights: $w_i^{(m+1)} \propto w_i^{(m)} \exp\!\bigl(-\alpha_m y_i h_m(\mathbf{x}_i)\bigr)$.
+
+The final classifier is $\hat{f}(\mathbf{x}) =
+\text{sign}\!\bigl(\sum_m \alpha_m h_m(\mathbf{x})\bigr)$. From a loss-function perspective, AdaBoost minimises the exponential loss $\sum_i \exp(-y_i F(\mathbf{x}_i))$ stagewise [@HastieEtAl2009].[^11]
+
+[^11]: The exponential loss is more sensitive to outliers than log-loss because it grows without bound for large margin violations. Real AdaBoost (using log-loss instead) is more robust in practice.
+
+**Key hyperparameters:** `iter` (boosting rounds), `nu` (shrinkage), `type` (`"discrete"` = decision stumps, `"real"` = probabilistic stumps).
+
+```{r adaboost-cls}
+fit_ada <- fit(formula_cls, data = data_cls, model = "adaboost",
+               spec = list(iter = 100, nu = 1, type = "discrete"))
+fit_ada
+```
+
+## Kernel and Similarity Methods
+
+The following two learners make predictions by comparing new observations to training data. SVMs find the most informative boundary; kNN uses nearest neighbours directly.
+
+### Support Vector Machines (`e1071_svm`)
+
+**Theory.** The support vector machine [@CortesVapnik1995] finds the *maximum-margin* separating hyperplane. For binary classification with $y_i \in \{-1, +1\}$, the hard-margin SVM solves:
+
+$$
+\min_{\mathbf{w}, b}\; \tfrac{1}{2}\|\mathbf{w}\|^2
+\quad \text{s.t.}\quad
+y_i(\mathbf{w}^\top \phi(\mathbf{x}_i) + b) \ge 1 \;\; \forall i
+$$
+
+The *margin* $2/\|\mathbf{w}\|$ is the width of the slab between the two class boundaries; maximising it minimises generalisation error (by structural risk minimisation). When classes are not linearly separable, slack variables $\xi_i \ge 0$ allow margin violations at cost $C$:
+
+$$
+\min_{\mathbf{w}, b, \boldsymbol{\xi}}\;
+  \tfrac{1}{2}\|\mathbf{w}\|^2 + C\sum_i \xi_i
+\quad \text{s.t.}\quad
+y_i(\mathbf{w}^\top \phi(\mathbf{x}_i) + b) \ge 1 - \xi_i
+$$
+
+The *kernel trick* replaces $\phi(\mathbf{x}_i)^\top\phi(\mathbf{x}_j)$ with a kernel function $k(\mathbf{x}_i, \mathbf{x}_j)$, implicitly mapping to a high-dimensional feature space without computing the map explicitly. Common kernels:
+
+| Kernel | Formula | Characteristic |
+|------------------------|------------------------|------------------------|
+| Linear | $\mathbf{x}^\top \mathbf{x}'$ | Linear boundaries |
+| RBF/Gaussian | $\exp(-\gamma\|\mathbf{x}-\mathbf{x}'\|^2)$ | Localised, universal approximator |
+| Polynomial | $(\mathbf{x}^\top \mathbf{x}' + r)^d$ | Global polynomial boundaries |
+
+For regression ($\varepsilon$-SVR), the objective is the same but the constraint requires prediction errors to be within an $\varepsilon$-tube.
+
+**Key hyperparameters:** `kernel`, `cost` ($C$), `gamma` (RBF bandwidth), `epsilon` (SVR insensitive tube width).
+
+```{r svm-cls}
+fit_svm <- fit(formula_cls, data = data_cls, model = "e1071_svm",
+               spec = list(kernel = "radial", cost = 1, gamma = 0.1))
+fit_svm
+```
+
+### Weighted $k$-Nearest Neighbours (`kknn`)
+
+**Theory.** The $k$-nearest-neighbours classifier [@Fix1951; @Aha1991] assigns label to $\mathbf{x}$ based on the $k$ closest training points. Weighted kNN assigns kernel-based weights that decay with distance:
+
+$$
+\hat{f}(\mathbf{x})
+= \frac{\sum_{j=1}^k w_j\, y_{(j)}}{\sum_{j=1}^k w_j},
+\qquad
+w_j = K\!\left(\frac{d(\mathbf{x}, \mathbf{x}_{(j)})}{d(\mathbf{x}, \mathbf{x}_{(k)})}\right)
+$$
+
+where $K$ is a kernel function (e.g., Epanechnikov, triangular, optimal) and $d$ is the Minkowski distance of order $r$ ($r=1$: Manhattan, $r=2$: Euclidean). kNN has no training phase; the entire dataset is stored and queried at prediction time, making prediction cost $O(np)$ per query in the naive implementation.
+
+::: callout-warning
+## kNN and the curse of dimensionality
+
+kNN degrades rapidly as $p$ increases: in high dimensions, all points become approximately equidistant from a query, so "nearest" neighbours are no longer genuinely similar. Feature selection, dimensionality reduction, or feature scaling can mitigate this, but kNN is generally not recommended for $p \gtrsim 20$ without careful preprocessing.
+:::
+
+**Key hyperparameters:** `k`, `kernel` (weighting function), `distance` (Minkowski order).
+
+```{r kknn-reg}
+fit_kknn <- fit(formula_reg, data = data_reg, model = "kknn",
+                spec = list(k = 7, kernel = "optimal"))
+fit_kknn
+```
+
+## Additive and Basis-Expansion Models
+
+The following two learners extend GLMs by allowing non-linear effects without abandoning the additive structure that makes linear models interpretable.
+
+### Generalised Additive Models (`gam`)
+
+**Theory.** Generalised additive models [@Hastie1986; @Wood2017] replace the linear predictor with a sum of smooth univariate functions:
+
+$$
+g(\mu_i)
+= \beta_0 + f_1(x_{i1}) + f_2(x_{i2}) + \cdots + f_p(x_{ip})
+$$
+
+Each $f_j$ is a penalised regression spline, typically a thin-plate spline. Smoothness is enforced by a roughness penalty on the second derivative: $$
+J(f_j) = \int \!\bigl[f_j''(x)\bigr]^2 \,dx
+$$
+
+A large penalty forces $f_j$ toward a straight line; a small penalty allows $f_j$ to be highly wiggly. The smoothing parameter for each term is selected automatically by restricted maximum likelihood (REML) or generalised cross-validation (GCV) [@Wood2004]. GAMs retain the *additive* structure of GLMs , each smooth can be visualised and interpreted separately , while capturing nonlinear marginal effects.[^12]
+
+[^12]: GAMs cannot directly model non-additive interactions unless interaction smooths $f_{jk}(x_j, x_k)$ are explicitly included. Thin-plate regression splines with `te()` or `ti()` terms in `mgcv` provide this capability.
+
+```{r gam-reg}
+formula_gam <- birth_weight_g ~ age + lwt
+fit_gam <- fit(formula_gam, data = data_reg, model = "gam")
+fit_gam
+```
+
+### Multivariate Adaptive Regression Splines (`earth`)
+
+**Theory.** MARS [@Friedman1991MARS] builds a piecewise-linear model by adaptively selecting *hinge functions* from a basis dictionary:
+
+$$
+\hat{f}(\mathbf{x})
+= \beta_0 + \sum_{m=1}^M \beta_m B_m(\mathbf{x})
+$$
+
+Each basis function $B_m$ is a product of one or more hinge functions $(x_j - t)_+ = \max(0, x_j - t)$ or $(t - x_j)_+$ for knot $t$. Products of hinge functions from different features model interactions. The algorithm proceeds in two phases:
+
+1.  **Forward pass**: greedily add hinge pairs that most reduce training error, potentially modelling interactions up to degree $d$.
+2.  **Backward pass**: prune using the GCV criterion: $$
+    \text{GCV}(M) = \frac{\hat{\sigma}^2}{\bigl(1 - C(M)/n\bigr)^2}
+    $$ where $C(M)$ is an effective-degrees-of-freedom penalty. MARS performs automatic variable selection (a feature dropped in pruning contributes zero basis functions) and discovers interactions without pre-specification.
+
+**Key hyperparameters:** `degree` (maximum interaction order; 1 = purely additive), `nprune` (maximum retained terms).
+
+```{r earth-reg}
+fit_earth <- fit(formula_reg, data = data_reg, model = "earth",
+                 spec = list(degree = 2, nprune = 10))
+fit_earth
+```
+
+## Bayesian Methods
+
+Bayesian approaches place priors on model parameters and update them with data to form a posterior distribution. The posterior predictive distribution naturally quantifies prediction uncertainty, which is valuable in clinical and scientific applications.
+
+### Bayesian Additive Regression Trees (`bart`)
+
+**Theory.** BART [@Chipman2010] represents the unknown function as a sum of $B$ shallow regression trees:
+
+$$
+f(\mathbf{x}) = \sum_{b=1}^B g(\mathbf{x};\, \mathcal{T}_b, \mathcal{M}_b)
+$$
+
+where $\mathcal{T}_b$ is the $b$-th tree's structure and $\mathcal{M}_b$ its leaf parameters. The key insight is that each tree is meant to contribute only a small, regularised portion of the overall fit. This is enforced through regularisation priors:
+
+-   **Tree structure prior**: branching probability at depth $d$ is $\alpha(1+d)^{-\beta}$, favouring shallow trees.
+-   **Leaf prior**: $\mu_{b\ell} \sim N(0, \sigma_\mu^2)$ with $\sigma_\mu = 0.5/(k\sqrt{B})$, so that the prior 95% interval for $f(\mathbf{x})$ spans the range of $y$.
+-   **Error prior**: $\sigma^2 \sim \text{Inv-}\chi^2(\nu, \lambda)$.
+
+Posterior inference uses a Gibbs sampler (backfitting MCMC): in each sweep, each tree is updated while holding the others fixed by fitting its tree to the current partial residuals. The posterior predictive distribution provides credible intervals for predictions without bootstrap.[^13]
+
+[^13]: BART's regularisation priors make it remarkably robust to overfitting without cross-validated hyperparameter tuning. The default priors ($B=200$, $k=2$, $\nu=3$) often perform well out-of-the-box across a wide range of datasets [@Chipman2010].
+
+**Key hyperparameters:** `ntree` (number of trees, default 200), `k` (leaf prior tightness), `ndpost` (posterior draws), `nskip` (burn-in draws).
+
+```{r bart-reg}
+fit_bart <- fit(formula_reg, data = data_reg, model = "bart",
+                spec = list(ntree = 50, ndpost = 200, nskip = 50,
+                            seed = 42))
+fit_bart
+```
+
+### Naive Bayes (`naivebayes`)
+
+**Theory.** Naive Bayes applies Bayes' theorem under the *conditional independence assumption*: given the class, all features are mutually independent [@NaiveBayes1960]:
+
+$$
+\hat{P}(Y = k \mid \mathbf{x})
+\propto \hat{P}(Y = k)
+\prod_{j=1}^p \hat{P}(X_j = x_j \mid Y = k)
+$$
+
+The class-conditional densities $P(X_j \mid Y = k)$ are estimated parametrically (Gaussian for continuous, multinomial or Bernoulli for discrete) or non-parametrically (kernel density). At prediction time, the posterior is computed for each class and the argmax returned.
+
+Despite the conditional independence assumption being almost always violated in practice, Naive Bayes often achieves competitive accuracy, particularly in text classification where $p$ is very large relative to $n$. The independence assumption essentially acts as a strong regulariser.
+
+**Key hyperparameters:** `usekernel` (kernel density estimation for continuous features), `laplace` (additive/Laplace smoothing for discrete features).
+
+```{r naivebayes-cls}
+fit_nb <- fit(formula_cls, data = data_cls, model = "naivebayes")
+fit_nb
+```
+
+## Discriminant Analysis
+
+Discriminant analysis methods assume multivariate Gaussian class-conditional distributions and derive Bayes-optimal classification rules under those assumptions.
+
+### Linear Discriminant Analysis (`lda`)
+
+**Theory.** Fisher's linear discriminant analysis [@Fisher1936] seeks a linear projection $\mathbf{w}$ that maximises between-class scatter relative to within-class scatter , a signal-to-noise ratio in projected space:
+
+$$
+\mathbf{w}^*
+= \arg\max_{\mathbf{w}}
+  \frac{\mathbf{w}^\top \mathbf{S}_B \mathbf{w}}
+       {\mathbf{w}^\top \mathbf{S}_W \mathbf{w}}
+$$
+
+where $\mathbf{S}_B = \sum_k n_k
+(\boldsymbol{\mu}_k - \boldsymbol{\mu})
+(\boldsymbol{\mu}_k - \boldsymbol{\mu})^\top$ is the between-class scatter matrix and $\mathbf{S}_W = \sum_k \sum_{i: y_i = k}
+(\mathbf{x}_i - \boldsymbol{\mu}_k)
+(\mathbf{x}_i - \boldsymbol{\mu}_k)^\top$ the within-class scatter matrix. The solution is the leading eigenvectors of $\mathbf{S}_W^{-1}\mathbf{S}_B$ (at most $K-1$ non-zero eigenvalues).[^14]
+
+[^14]: LDA requires $\mathbf{S}_W$ to be invertible, which fails when $p \ge n$. Regularised LDA (e.g., via shrinkage estimators for $\boldsymbol{\Sigma}$) addresses this for high-dimensional settings.
+
+Under multivariate Gaussianity with a *common* covariance $\boldsymbol{\Sigma}$, LDA is the Bayes-optimal classifier and its decision boundaries are linear hyperplanes: $$
+\delta_k(\mathbf{x})
+= \mathbf{x}^\top \boldsymbol{\Sigma}^{-1} \boldsymbol{\mu}_k
+- \tfrac{1}{2}\boldsymbol{\mu}_k^\top \boldsymbol{\Sigma}^{-1}
+  \boldsymbol{\mu}_k + \log \pi_k
+$$
+
+```{r lda-cls}
+fit_lda <- fit(formula_cls, data = data_cls, model = "lda")
+fit_lda
+```
+
+### Quadratic Discriminant Analysis (`qda`)
+
+**Theory.** QDA relaxes LDA's equal-covariance assumption. Each class has its own covariance matrix $\boldsymbol{\Sigma}_k$, giving quadratic decision boundaries [@HastieEtAl2009]:
+
+$$
+\delta_k(\mathbf{x})
+= -\tfrac{1}{2}\log|\boldsymbol{\Sigma}_k|
+  -\tfrac{1}{2}(\mathbf{x}-\boldsymbol{\mu}_k)^\top
+   \boldsymbol{\Sigma}_k^{-1}(\mathbf{x}-\boldsymbol{\mu}_k)
+  + \log \pi_k
+$$
+
+QDA requires estimating $p(p+1)/2$ parameters per class and is only applicable when $n_k > p$ for each class. When $p$ is large relative to sample size, LDA , which pools the covariance estimate , typically generalises better.
+
+```{r qda-cls}
+fit_qda <- fit(formula_cls, data = data_cls, model = "qda")
+fit_qda
+```
+
+### Flexible Discriminant Analysis (`fda`)
+
+**Theory.** Flexible DA [@HastieTibshirani1996] generalises LDA by replacing the linear regression step with an arbitrary smooth regression. The key insight is that LDA can be reframed as a linear regression of optimal scoring responses; FDA substitutes any regression method for the linear regression in this dual formulation. Let $\Theta \in \mathbb{R}^{K \times (K-1)}$ be optimal scoring coefficients and $\hat{\boldsymbol{\eta}}$ a flexible regression; FDA solves:
+
+$$
+\min_{\Theta,\, \eta}
+\sum_{i=1}^n
+\|\Theta^\top \mathbf{z}_i - \eta(\mathbf{x}_i)\|^2
+\quad\text{subject to orthogonality constraints}
+$$
+
+where $\mathbf{z}_i$ is the indicator-coded class vector. Substituting MARS for $\eta$ gives FDA-MARS: non-linear decision boundaries with automatic variable selection, applicable to multiclass problems.
+
+```{r fda-cls}
+fit_fda <- fit(formula_cls, data = data_cls, model = "fda")
+fit_fda
+```
+
+## Neural Networks
+
+### Single-Hidden-Layer Neural Network (`nnet`)
+
+**Theory.** A feedforward network with one hidden layer of $H$ units computes a composition of linear maps and pointwise nonlinearities:
+
+$$
+\hat{f}(\mathbf{x})
+= g_o\!\left(
+    \boldsymbol{\beta}_0
+    + \sum_{h=1}^H \beta_h
+      \cdot g_h\!\left(
+          \alpha_{h0} + \sum_{j=1}^p \alpha_{hj} x_j
+        \right)
+  \right)
+$$
+
+The hidden-unit activation $g_h$ is typically the logistic sigmoid $g_h(a) = (1+e^{-a})^{-1}$; the output activation $g_o$ is the identity for regression and softmax for classification. By the universal approximation theorem [@Hornik1989], a single hidden layer with sufficiently many units can approximate any continuous function on a compact domain , but this result is existential, not constructive.[^15]
+
+[^15]: The universal approximation theorem says a solution *exists* with enough units; it says nothing about how to *find* it. In practice, training a single-hidden-layer network with many units is harder than training a deeper network with fewer units per layer, which is why deep learning architectures are preferred for complex tasks.
+
+Parameters are estimated by minimising a weight-decay-regularised loss: $$
+L_{\text{reg}} = L(\mathbf{y}, \hat{\mathbf{y}})
++ \frac{\lambda}{2}\!\left(\sum_{h,j}\alpha_{hj}^2 + \sum_h\beta_h^2\right)
+$$ using backpropagation [@Rumelhart1986] and the BFGS quasi-Newton optimiser implemented in `nnet`.
+
+**Key hyperparameters:** `size` (hidden units $H$), `decay` (weight regularisation $\lambda$), `maxit` (maximum iterations).
+
+```{r nnet-reg}
+fit_nnet <- fit(formula_reg, data = data_reg, model = "nnet",
+                spec = list(size = 5, decay = 0.01, linout = TRUE,
+                            trace = FALSE))
+fit_nnet
+```
+
+## Ensemble Aggregation
+
+The stacking and SuperLearner methods combine multiple base learners into a single ensemble. Unlike bagging (which averages homogeneous learners) and boosting (which combines sequentially), these methods learn an optimal combination of *heterogeneous* learners.
+
+### Stacking (`stacking`)
+
+**Theory.** Stacked generalisation [@Wolpert1992; @Breiman1996Stacked] uses a meta-learner to combine out-of-fold predictions from a set of diverse base learners. Let $\hat{f}_1, \ldots, \hat{f}_L$ be $L$ base learners. For each observation $i$, collect cross-validated predictions from each base learner into a meta-feature matrix:
+
+$$
+\tilde{\mathbf{X}}
+=\begin{pmatrix}
+\hat{f}_1^{(-1)}(\mathbf{x}_1) & \cdots &\hat{f}_L^{(-1)}(\mathbf{x}_1)\\
+\vdots & \ddots & \vdots \\
+\hat{f}_1^{(-n)}(\mathbf{x}_n) & \cdots &\hat{f}_L^{(-n)}(\mathbf{x}_n)
+\end{pmatrix}
+$$
+
+where the superscript $(-i)$ indicates that observation $i$ was excluded from the training fold. A meta-learner (default: GLM in **funcml**) is trained on $\tilde{\mathbf{X}}$ to produce the final prediction. The use of out-of-fold predictions prevents the meta-learner from over-weighting base learners that memorised the training data.[^16]
+
+[^16]: The meta-learner coefficients serve as learner weights but are not constrained to be non-negative or to sum to one , the GLM meta-learner can even assign negative weights if one learner's errors are systematically opposite to another's.
+
+**Key hyperparameters:** `learners` (base learner IDs), `meta_learner` (default `"glm"`).
+
+```{r stacking-reg}
+fit_stack <- fit(formula_reg, data = data_reg, model = "stacking",
+                 spec = list(learners = c("glm", "rpart", "ranger"),
+                             meta_learner = "glm"))
+fit_stack
+```
+
+### SuperLearner (`superlearner`)
+
+**Theory.** The SuperLearner [@vanDerLaan2007; @Polley2010] selects the optimal *convex* combination of base learner cross-validated predictions:
+
+$$
+\hat{\boldsymbol{\alpha}}
+= \arg\min_{\boldsymbol{\alpha} \ge \mathbf{0},\;
+            \mathbf{1}^\top\boldsymbol{\alpha} = 1}
+  \frac{1}{n}\sum_{i=1}^n
+  L\!\left(y_i,\; \sum_{l=1}^L \alpha_l\,
+    \hat{f}_l^{(-i)}(\mathbf{x}_i)\right)
+$$
+
+The convex hull constraint ($\alpha_l \ge 0$, $\sum_l \alpha_l = 1$) ensures the ensemble never extrapolates beyond the support of its base learners. The SuperLearner is *asymptotically optimal*: under mild conditions, it converges to the oracle-best convex combination of the candidate learners, and if one of the candidates is the true model, the SuperLearner will converge to it [@vanDerLaan2007].
+
+The difference between stacking and SuperLearner is therefore the constraint. SuperLearner is conservative (never worse than the best base learner asymptotically); stacking's unconstrained meta-learner can outperform any individual candidate but may also overfit.
+
+```{r superlearner-reg}
+fit_sl <- fit(formula_reg, data = data_reg, model = "superlearner",
+              spec = list(learners = c("glm", "rpart", "ranger")))
+fit_sl
+```
+
+The learner registry provides the models; the next section provides the vocabulary for quantifying their quality.
+
+# Performance Metrics {#sec-metrics}
+
+**funcml** exposes 18 metrics organised into four families. All share the same call signature: `metric(truth, pred)` or `metric(truth, prob_matrix)` for probability-based measures.
+
+## Regression Metrics
+
+Let $\{(y_i, \hat{y}_i)\}_{i=1}^n$ be truth–prediction pairs and $\bar{y} = n^{-1}\sum_i y_i$.
+
+| Metric | Formula | Notes |
+|------------------------|------------------------|------------------------|
+| RMSE | $\sqrt{n^{-1}\sum_i (y_i - \hat{y}_i)^2}$ | Same units as $y$ |
+| MAE | $n^{-1}\sum_i |y_i - \hat{y}_i|$ | Robust to outliers |
+| MSE | $n^{-1}\sum_i (y_i - \hat{y}_i)^2$ | Penalises large errors |
+| MedAE | $\text{median}(|y_i - \hat{y}_i|)$ | Highly robust |
+| MAPE | $\frac{100}{n}\sum_i|y_i - \hat{y}_i|/|y_i|$ | Scale-free; undefined when $y_i = 0$ |
+| $R^2$ | $1 - \frac{\sum(y_i-\hat{y}_i)^2}{\sum(y_i-\bar{y})^2}$ | Fraction of variance explained |
+
+: Regression performance metrics. {#tbl-reg-metrics}
+
+## Classification Metrics
+
+For binary classification with $y \in \{0, 1\}$, let TP, FP, FN, TN denote confusion matrix counts.
+
+| Metric | Formula | Focus |
+|------------------------|------------------------|------------------------|
+| Accuracy | $(TP + TN)/n$ | Overall correctness |
+| Precision | $TP/(TP+FP)$ | Among positives predicted, how many are true |
+| Recall (Sensitivity) | $TP/(TP+FN)$ | Among true positives, how many detected |
+| Specificity | $TN/(TN+FP)$ | Among true negatives, how many detected |
+| F1 | $2 \cdot \text{Prec} \cdot \text{Rec}/(\text{Prec}+\text{Rec})$ | Harmonic mean |
+| Balanced Accuracy | $(Recall + Specificity)/2$ | Robust to class imbalance |
+
+: Binary classification metrics based on the confusion matrix. {#tbl-cls-metrics}
+
+## Probabilistic Metrics
+
+These metrics require predicted probability outputs (`type = "prob"`) and measure the quality of the full probability distribution, not just the predicted class.
+
+**Log-loss (cross-entropy)** penalises confident wrong predictions more than uncertain ones: $$
+\mathcal{L}_{\log}
+= -\frac{1}{n}\sum_{i=1}^n\sum_{k=1}^K y_{ik}\log\hat{p}_{ik}
+$$
+
+**Brier score** [@Brier1950] measures mean-squared probability error, decomposable into resolution, reliability, and uncertainty: $$
+\text{BS}
+= \frac{1}{n}\sum_{i=1}^n\sum_{k=1}^K (\hat{p}_{ik} - y_{ik})^2
+$$
+
+**AUC** [@Fawcett2006] is the area under the ROC curve , equal to the probability that a randomly chosen positive observation receives a higher predicted score than a randomly chosen negative observation. For multiclass problems, the Hand–Till [@HandTill2001] extension averages pairwise AUC values.[^17]
+
+[^17]: The AUC is a threshold-independent measure of *discrimination* , it does not assess whether the probabilities are well-calibrated (accurate in magnitude). A model can have high AUC but poor calibration, or vice versa. Both properties matter in clinical and decision-support applications.
+
+## Calibration Metrics
+
+A model is *calibrated* if $\hat{P}(Y = 1 \mid \hat{p} = p) \approx p$ for all $p$. Among observations with predicted probability near 0.7, for instance, roughly 70% should actually be positive. Calibration is distinct from discrimination: a model can rank patients correctly (high AUC) but systematically overestimate risk (poor calibration).
+
+Let $\{B_m\}_{m=1}^M$ partition the predicted probability range. The **Expected Calibration Error** (ECE) is the weighted average absolute gap between accuracy and confidence across bins: $$
+\text{ECE}
+= \sum_{m=1}^M \frac{|B_m|}{n}
+  \bigl|\text{acc}(B_m) - \text{conf}(B_m)\bigr|
+$$
+
+The **Maximum Calibration Error** (MCE) is the worst-case gap: $$
+\text{MCE}
+= \max_m \bigl|\text{acc}(B_m) - \text{conf}(B_m)\bigr|
+$$
+
+```{r metrics-demo}
+truth <- data_reg$birth_weight_g
+pred  <- predict(fit_ranger, newdata = data_reg)
+
+rmse(truth, pred)
+mae(truth, pred)
+rsq(truth, pred)
+```
+
+Metrics only carry meaning when computed on held-out data. The next section shows how `evaluate()` handles this automatically via cross-validation.
+
+# Resampling-Based Evaluation {#sec-eval}
+
+The `evaluate()` function performs $K$-fold cross-validated model assessment and returns a `funcml_eval` object with fold-level results, summary statistics, and confidence intervals.
+
+```{r evaluate-reg}
+eval_reg <- evaluate(
+  data       = data_reg,
+  formula    = formula_reg,
+  model      = "ranger",
+  resampling = cv(v = 5, seed = 42),
+  metrics    = c("rmse", "mae", "rsq"),
+  seed       = 42
+)
+eval_reg
+```
+
+```{r evaluate-cls}
+eval_cls <- evaluate(
+  data       = data_cls,
+  formula    = formula_cls,
+  model      = "ranger",
+  resampling = cv(v = 5, seed = 42),
+  metrics    = c("accuracy", "auc", "logloss"),
+  type       = "prob",
+  seed       = 42
+)
+eval_cls
+```
+
+The `plot()` method displays the fold-level metric distribution, providing a visual sense of estimator variance across folds:
+
+```{r eval-plot, fig.cap="Cross-validated RMSE distribution across 5 folds for a Random Forest on the birthweight dataset. The point and interval show the mean and 95% confidence interval across folds."}
+plot(eval_reg)
+```
+
+Cross-validation gives a performance estimate for fixed hyperparameters. The next section shows how to search for configurations that improve on these defaults.
+
+# Hyperparameter Tuning {#sec-tuning}
+
+## Theory
+
+Most learners have hyperparameters , configuration choices made before training , that substantially affect generalisation performance. Let $\boldsymbol{\lambda} \in \Lambda$ be the hyperparameter vector. The tuning objective is:
+
+$$
+\hat{\boldsymbol{\lambda}}
+= \arg\min_{\boldsymbol{\lambda} \in \Lambda}
+  \widehat{\text{CV}}_K(f_{\boldsymbol{\lambda}})
+$$
+
+**Grid search** exhaustively evaluates all combinations in a user-specified grid $\{\boldsymbol{\lambda}^{(g)}\}_{g=1}^G$. It scales exponentially with the number of hyperparameters but is deterministic and interpretable.
+
+**Random search** [@HastieEtAl2009] samples $N_{\text{eval}}$ configurations uniformly at random from $\Lambda$. In high-dimensional hyperparameter spaces it is usually more efficient than grid search because it avoids wasting evaluations on redundant dimensions , if one hyperparameter matters far more than others, random search spreads evaluations across that dimension more broadly than a regular grid.
+
+**Nested cross-validation** produces an unbiased estimate of the generalisation error of the *entire model-selection pipeline* by wrapping the inner tuning loop in an outer evaluation loop:
+
+$$
+\text{Err}_{\text{tuned}}
+= \mathbb{E}\!\left[
+    \widehat{\text{CV}}_K^{\text{outer}}\!\!\left(
+      \hat{f}_{\hat{\boldsymbol{\lambda}}(\mathcal{D}^{\text{train}})}
+    \right)
+  \right]
+$$
+
+::: callout-warning
+## Model selection bias
+
+Evaluating a tuned model on the same data used for tuning produces an optimistically biased performance estimate. The selected $\hat{\boldsymbol{\lambda}}$ is the configuration that happened to perform best on that particular resample, not necessarily the best for new data. **Nested CV** corrects this by evaluating the entire tuning procedure , selection included , on held-out outer folds.
+:::
+
+## Grid and Random Search
+
+```{r tune-grid}
+grid_rpart <- expand.grid(
+  cp       = c(0.001, 0.01, 0.05),
+  minsplit = c(5, 10, 20)
+)
+
+tune_rpart <- tune(
+  data       = data_reg,
+  formula    = formula_reg,
+  model      = "rpart",
+  grid       = grid_rpart,
+  resampling = cv(v = 5, seed = 42),
+  metric     = "rmse",
+  search     = "grid",
+  seed       = 42
+)
+
+tune_rpart
+tune_rpart$best
+```
+
+```{r tune-random}
+grid_ranger <- expand.grid(
+  num.trees = c(100, 200, 300),
+  mtry      = c(2, 3, 5)
+)
+
+tune_ranger <- tune(
+  data       = data_reg,
+  formula    = formula_reg,
+  model      = "ranger",
+  grid       = grid_ranger,
+  resampling = cv(v = 5, seed = 42),
+  metric     = "rmse",
+  search     = "random",
+  n_evals    = 6,
+  seed       = 42
+)
+
+tune_ranger$best
+```
+
+```{r tune-plot, fig.cap="Tuning landscape for the CART model. Each point is a hyperparameter configuration evaluated under 5-fold CV; colour encodes RMSE. The star marks the selected configuration."}
+plot(tune_rpart)
+```
+
+## Nested Cross-Validation
+
+```{r nested-tune}
+nested <- tune(
+  data             = data_reg,
+  formula          = formula_reg,
+  model            = "rpart",
+  grid             = grid_rpart,
+  resampling       = cv(v = 3, seed = 1),
+  outer_resampling = cv(v = 4, seed = 2),
+  metric           = "rmse",
+  seed             = 42
+)
+nested
+```
+
+With hyperparameters selected, the natural next step is to see whether the chosen learner is competitive with alternatives on the same task.
+
+# Learner Comparison {#sec-compare}
+
+The `compare_learners()` function benchmarks multiple learners under a shared resampling design and metric set. All learners see the same folds, making the comparison fair and the results directly comparable.[^18]
+
+[^18]: Fixing the random seed and passing the same resampling object ensures that all learners are evaluated on exactly the same train/validation partitions. This controls for the variance due to the particular split and allows performance differences to be attributed to the learner rather than to sampling.
+
+```{r compare}
+cmp <- compare_learners(
+  data       = data_reg,
+  formula    = formula_reg,
+  models     = c("glm", "rpart", "ranger", "gbm", "xgboost"),
+  resampling = cv(v = 5, seed = 42),
+  metrics    = c("rmse", "mae"),
+  seed       = 42
+)
+cmp
+```
+
+```{r compare-plot, fig.cap="Learner comparison by cross-validated RMSE on the birthweight regression dataset. Lower is better. Error bars show the 95% confidence interval across folds."}
+plot(cmp)
+```
+
+::: callout-tip
+## How to read a benchmark
+
+A GLM baseline is essential. If a complex model (boosting, random forest) cannot beat the linear baseline by a meaningful margin, the added complexity is not justified. Conversely, a large gap suggests substantial non-linearity or interactions in the data. RMSE differences should be compared relative to the outcome's standard deviation: a 50-gram RMSE improvement on a 750-gram outcome SD is meaningful; a 2-gram improvement is noise.
+:::
+
+Having identified a performant learner, the next question is not merely *how well* it performs, but *why* , which features drive the predictions and how. That is the focus of the interpretation section.
+
+# Model Interpretation {#sec-interpret}
+
+## Overview
+
+The `interpret()` function provides a unified gateway to fourteen model-agnostic interpretation methods, all operating on a `funcml_fit` object and a reference dataset. The methods fall into three groups by scope:
+
+| Scope | Methods |
+|------------------------------------|------------------------------------|
+| **Global** (population-level) | VIP, Permutation, PDP, ALE, Interaction, Surrogate |
+| **Local** (individual prediction) | ICE, LIME, Local model, SHAP, Ceteris paribus |
+| **Diagnostic** | Calibration |
+
+All methods return a structured S3 object with `print()`, `summary()`, and `plot()` methods. We use a Random Forest on the birthweight data as the black-box model throughout.
+
+```{r interp-fit}
+fit_rf_reg <- fit(formula_reg, data = data_reg, model = "ranger",
+                  spec = list(num.trees = 300, seed = 42))
+```
+
+## Variable Importance (Model-Based VIP)
+
+**Theory.** Many models expose a native importance measure derived from their internal structure. For tree ensembles, the *mean-decrease impurity* (MDI) sums the weighted impurity reduction at all nodes where feature $j$ was used, across all trees in the ensemble:
+
+$$
+\text{VIP}(j)
+= \frac{1}{B}\sum_{b=1}^B \sum_{t \in \mathcal{T}^{(b)}_j}
+  \frac{n_t}{n}\,\Delta\text{Impurity}(t)
+$$
+
+For linear models, importance is derived from standardised absolute coefficients. The `vip` method automatically dispatches to the model's native mechanism when available; otherwise it falls back to permutation importance [@Greenwell2020].
+
+::: callout-warning
+## Limitation of MDI importance
+
+MDI is biased toward features with many unique values (continuous variables, high-cardinality factors) and toward features used early in trees. When features are correlated, MDI inflates the importance of correlated groups [@Strobl2007]. For unbiased importance estimates, prefer **permutation importance** (Section 10.2) or **conditional permutation importance** from `cforest`.
+:::
+
+```{r vip, fig.cap="Model-based variable importance (MDI) for the Random Forest. Bars show mean impurity decrease."}
+vip_obj <- interpret(fit_rf_reg, data_reg, method = "vip")
+plot(vip_obj)
+```
+
+## Permutation Importance
+
+**Theory.** Permutation-based importance [@Fisher2019; @Breiman2001VIP] measures the *predictive value* of each feature by breaking its association with the response. For each feature $j$, the values of $x_j$ across the dataset are randomly permuted, the model is re-applied without retraining, and the increase in prediction error is recorded:
+
+$$
+\text{PI}(j)
+= \frac{1}{S}\sum_{s=1}^S \hat{L}_s(\pi_j) - \hat{L}
+$$
+
+where $\hat{L}$ is the baseline loss on the original data, $\hat{L}_s(\pi_j)$ the loss after permuting feature $j$ in repetition $s$, and $S$ the number of permutation repetitions. A large increase signals that the feature was genuinely useful; a small increase (near zero) means the model's predictions were insensitive to that feature.
+
+Permutation importance is model-agnostic , it treats the model as a black box , and is linked directly to the chosen evaluation metric.[^19] The ratio version $\text{PI}_{\text{ratio}}(j) =
+\hat{L}(\pi_j)/\hat{L}$ is scale-independent and useful for comparing across datasets.
+
+[^19]: Because permutation importance is measured on the training (reference) data, it reflects which features were used during training. Computing it on held-out data gives importance conditional on generalisation, which may differ from training-set importance for overfit models.
+
+```{r permute, fig.cap="Permutation importance for the Random Forest (20 repetitions, RMSE loss). Error bars show the standard deviation across permutation repetitions."}
+perm_obj <- interpret(fit_rf_reg, data_reg, method = "permute",
+                      metric = "rmse", nsim = 20, seed = 42)
+plot(perm_obj)
+```
+
+## Partial Dependence Plots (PDP)
+
+**Theory.** The partial dependence function for feature $j$ [@Friedman2001PDP; @Greenwell2017] shows the *average* model prediction as $x_j$ varies, marginalising over the joint distribution of all other features:
+
+$$
+\hat{f}_j(z)
+= \mathbb{E}_{\mathbf{x}_{-j}}\!\left[\hat{f}(z, \mathbf{x}_{-j})\right]
+\approx \frac{1}{n}\sum_{i=1}^n \hat{f}(z, x_{i,-j})
+$$
+
+This Monte Carlo approximation substitutes the observed values of all other features for the complement $\mathbf{x}_{-j}$. The PDP shows the *marginal population-level effect* of $x_j$: if $x_j$ were changed to value $z$ for every observation, what would the average prediction be?
+
+::: callout-warning
+## PDP and correlated features
+
+The PDP averages over the observed marginal distribution of $\mathbf{x}_{-j}$, which can include combinations $(z, \mathbf{x}_{-j})$ that never occur in the data when features are correlated. For example, if height and weight are strongly correlated, a PDP might average predictions for (height = 200cm, weight = 40kg) , a biologically impossible combination. ALE plots (@sec-ale) resolve this by conditioning on *local* neighbourhoods rather than the global marginal.
+:::
+
+```{r pdp, fig.cap="Partial dependence of predicted birth weight on maternal pre-pregnancy weight (lwt). The rug marks show the distribution of observed lwt values."}
+pdp_obj <- interpret(fit_rf_reg, data_reg, method = "pdp",
+                     features = "lwt")
+plot(pdp_obj)
+```
+
+## Individual Conditional Expectation (ICE)
+
+**Theory.** ICE curves [@Goldstein2015] disaggregate the PDP: instead of averaging, we display the prediction profile for *each individual observation* as $x_j$ varies:
+
+$$
+\hat{f}_j^{(i)}(z)
+= \hat{f}(z, \mathbf{x}_{i,-j}),
+\quad i = 1, \ldots, n
+$$
+
+Each line shows what would happen to *one specific observation's prediction* if only $x_j$ were changed. The PDP is the vertical mean of all ICE curves.
+
+The diagnostic power of ICE lies in heterogeneity. If all ICE lines are parallel and non-crossing, the effect of $x_j$ is the same for everyone and there are no interactions involving $x_j$. If lines cross or have different slopes, the effect of $x_j$ depends on the values of other features , there is an interaction.[^20]
+
+[^20]: *Centred ICE* (c-ICE) subtracts each curve's value at a reference point $z_0$ (typically the minimum of $x_j$), making it easier to compare the *shape* of the effect across observations by removing baseline differences.
+
+```{r ice, fig.cap="ICE curves for maternal pre-pregnancy weight (lwt). Each grey line is one observation; the blue line is the partial dependence mean. Non-parallel lines indicate interaction effects."}
+ice_obj <- interpret(fit_rf_reg, data_reg, method = "ice",
+                     features = "lwt")
+plot(ice_obj)
+```
+
+## Accumulated Local Effects (ALE) {#sec-ale}
+
+**Theory.** Accumulated local effects [@ApleyZhu2020] address the extrapolation problem of PDP by conditioning on *local* neighbourhoods of $x_j$ rather than integrating over the global marginal. The main effect ALE for feature $j$ at value $z$ is defined as:
+
+$$
+\hat{f}_j^{\text{ALE}}(z)
+= \int_{z_0}^z
+  \mathbb{E}\!\left[
+    \frac{\partial\hat{f}(\mathbf{x})}{\partial x_j}
+    \;\bigg|\; x_j = t
+  \right] dt \;-\; C
+$$
+
+where $C$ is a centering constant ensuring zero mean. In practice, the interval $[z_0, z]$ is discretised into $K$ bins $[z_{k-1}, z_k]$ and the integral replaced by accumulated finite differences:
+
+$$
+\hat{f}_j^{\text{ALE}}(z_K)
+\approx \sum_{k=1}^K
+\frac{1}{|N_k|}
+\sum_{i:\, x_{ij} \in [z_{k-1}, z_k]}
+\!\!\bigl[\hat{f}(z_k, \mathbf{x}_{i,-j}) - \hat{f}(z_{k-1}, \mathbf{x}_{i,-j})\bigr]
+$$
+
+where $N_k = \{i : x_{ij} \in [z_{k-1}, z_k]\}$ is the set of observations falling in bin $k$. Because the differences are computed only for observations whose $x_j$ lies *within* each bin, the method never evaluates the model at combinations that cannot arise given the observed data distribution, even under strong feature correlation.[^21]
+
+[^21]: ALE plots measure the *unconfounded* main effect of a feature by removing the effect of correlated features via conditioning. They are consistent estimators of the true partial effect under correlation, whereas PDP is not [@ApleyZhu2020].
+
+```{r ale, fig.cap="Accumulated local effects for maternal pre-pregnancy weight (lwt). The y-axis shows the centered, unconfounded partial effect on predicted birth weight."}
+ale_obj <- interpret(fit_rf_reg, data_reg, method = "ale",
+                     features = "lwt")
+plot(ale_obj)
+```
+
+## LIME  , Local Surrogate Explanations
+
+**Theory.** LIME [@Ribeiro2016] explains a single prediction $\hat{f}(\mathbf{x}^*)$ by fitting a simple, interpretable surrogate model $g$ in a *neighbourhood* of $\mathbf{x}^*$:
+
+$$
+\hat{g}
+= \arg\min_{g \in \mathcal{G}}\,
+  \mathcal{L}(\hat{f}, g, \pi_{\mathbf{x}^*})
+  + \Omega(g)
+$$
+
+where $\mathcal{G}$ is a class of interpretable models (sparse linear models or decision trees), $\pi_{\mathbf{x}^*}(\mathbf{x}) =
+\exp(-d(\mathbf{x}^*, \mathbf{x})^2/\sigma^2)$ is a locality kernel weighting samples by proximity to $\mathbf{x}^*$, $\mathcal{L}$ is a weighted fidelity loss measuring how well $g$ approximates $\hat{f}$ near $\mathbf{x}^*$, and $\Omega(g)$ penalises model complexity.
+
+In **funcml**, LIME uses a local weighted linear regression where weights are derived from Gower distance , a distance metric that handles mixed-type features by normalising each variable to $[0,1]$ and using the absolute difference for continuous variables and a 0/1 indicator for categorical variables.
+
+The key idea is that while $\hat{f}$ may be globally non-linear and complex, it is often *locally linear* in a small neighbourhood around any query point. The local linear model $\hat{g}$ is the tangent-plane approximation of $\hat{f}$ at $\mathbf{x}^*$.
+
+```{r lime, fig.cap="LIME explanation for observation 5 in the birthweight dataset. Positive bars push the prediction up relative to the average; negative bars push it down."}
+lime_obj <- interpret(fit_rf_reg, data_reg, method = "lime",
+                      newdata = data_reg[5, , drop = FALSE],
+                      k = 3, seed = 42)
+plot(lime_obj)
+```
+
+## Local Surrogate Models (IML-style)
+
+**Theory.** The `local_model` method constructs an explicit local neighbourhood by finding the $k$ nearest training observations to $\mathbf{x}^*$ under Gower distance and fitting a weighted lasso (sparse linear model) on this neighbourhood. The Gower distance between $\mathbf{x}$ and $\mathbf{x}'$ is:
+
+$$
+d_{\text{Gower}}(\mathbf{x}, \mathbf{x}')
+= \frac{1}{p}\sum_{j=1}^p \delta_j(x_j, x_j')
+$$
+
+where $\delta_j$ is a feature-type-appropriate dissimilarity: the absolute range-normalised difference $|x_j - x_j'|/r_j$ for continuous features, and the 0/1 mismatch indicator for nominal features. The local lasso fit provides sparse feature attributions: coefficients are interpretable as the local marginal effect of each feature on the model's prediction near $\mathbf{x}^*$.
+
+The difference between `lime` and `local_model` in **funcml** is subtle: `lime` perturbs $\mathbf{x}^*$ to generate a neighbourhood; `local_model` uses the $k$ nearest *training* observations. The former is better when the training distribution is sparse; the latter is more stable when training data is dense.
+
+```{r local-model, fig.cap="Local surrogate (IML-style) explanation for observation 5. Coefficients are from a lasso fit on the 10 nearest neighbours, weighted by Gower distance."}
+local_obj <- interpret(fit_rf_reg, data_reg, method = "local_model",
+                       newdata = data_reg[5, , drop = FALSE],
+                       k = 10, seed = 42)
+plot(local_obj)
+```
+
+## SHAP Attributions
+
+**Theory.** Shapley values [@Shapley1953] originate in cooperative game theory. Consider a prediction as a *game* where features are *players* that cooperate to produce the model output. The Shapley value of player $j$ is its fair share of the total payout , the average marginal contribution of feature $j$ across all possible *orderings* in which features could have joined the coalition:
+
+$$
+\phi_j(\hat{f}, \mathbf{x})
+= \sum_{S \subseteq \mathcal{F} \setminus \{j\}}
+  \frac{|S|!\,(p-|S|-1)!}{p!}
+  \left[
+    v(S \cup \{j\}) - v(S)
+  \right]
+$$
+
+where $v(S)$ is the model output when only features in $S$ are known and others are integrated out (typically using the training-data marginal). Intuitively: for each possible subset $S$ not including $j$, we measure how much adding $j$ improves the prediction, and average over all possible subset orders weighted by their probability.
+
+SHAP [@LundbergLee2017] provides efficient approximations to these Shapley values and guarantees three axiomatic properties:
+
+-   **Local accuracy**: the sum of all SHAP values equals the difference between the prediction and the baseline $\hat{f}(\mathbf{x}) = \phi_0 + \sum_j \phi_j(\mathbf{x})$.
+-   **Missingness**: features with no effect on any prediction receive $\phi_j = 0$.
+-   **Consistency**: if a model changes so that feature $j$'s marginal contribution never decreases, its Shapley value cannot decrease.
+
+For tree ensembles, exact Shapley values can be computed in $O(TLD^2)$ time [@Lundberg2020], where $T$ is the number of trees, $L$ the maximum leaves, and $D$ the maximum depth.[^22]
+
+[^22]: The `shap` method in **funcml** uses the `shapviz` package [@shapvizpkg] which wraps `treeshap` for tree-exact computation and kernel SHAP for general black-box models. The `nsim` argument controls the number of background samples used for the kernel SHAP approximation in non-tree models.
+
+The `shap` method returns a `shapviz` object that supports a range of visualisation types through the `kind` argument.
+
+```{r shap-waterfall, fig.cap="SHAP waterfall for observation 5. Each bar shows one feature's contribution to the prediction, starting from the baseline (average prediction) and ending at the individual prediction."}
+shap_local <- interpret(fit_rf_reg, data_reg, method = "shap",
+                        newdata = data_reg[5, , drop = FALSE],
+                        nsim = 50, seed = 42)
+plot(shap_local, kind = "waterfall")
+```
+
+For a global view, compute SHAP values for all observations and aggregate:
+
+```{r shap-beeswarm, fig.cap="SHAP beeswarm (summary) plot. Each point is one observation; position on the x-axis shows the SHAP value; colour shows the feature value (red = high, blue = low). Features are sorted by mean absolute SHAP."}
+shap_all <- interpret(fit_rf_reg, data_reg, method = "shap",
+                      newdata = data_reg,
+                      nsim = 50, seed = 42)
+plot(shap_all, kind = "beeswarm")
+```
+
+```{r shap-bar, fig.cap="SHAP bar chart: mean absolute SHAP value per feature, equivalent to a global permutation importance but computed via SHAP."}
+plot(shap_all, kind = "bar")
+```
+
+::: callout-note
+## SHAP vs. permutation importance vs. LIME
+
+**Permutation importance** is global and model-agnostic but does not explain individual predictions. **LIME** explains individual predictions but is unstable , small changes in the neighbourhood or the perturbation distribution can change explanations substantially. **SHAP** is both locally accurate and globally consistent: individual SHAP values sum to the prediction (local accuracy), and aggregated over all observations they recover a global importance ranking (mean \|SHAP\|). For most applications, SHAP is preferable when computation allows; permutation importance is a fast, interpretable alternative for global ranking; LIME is most useful when a simple human-readable explanation is needed for a single prediction.
+:::
+
+## Global Surrogate Trees
+
+**Theory.** A global surrogate approximates the full black-box model with a single interpretable model trained on its *predictions* [@Molnar2018]. A decision tree is the standard choice:
+
+$$
+\hat{g}
+= \arg\min_{g \in \text{Trees}}
+  \sum_{i=1}^n L\!\bigl(\hat{f}(\mathbf{x}_i),\, g(\mathbf{x}_i)\bigr)
+$$
+
+The fidelity of the approximation is measured by the $R^2$ between $\hat{g}$ and $\hat{f}$. A high-fidelity surrogate provides a global, rule-based explanation of the black box. A low-fidelity surrogate means the tree is too simple to capture the model's logic, and any rules extracted from it are misleading.[^23]
+
+[^23]: A global surrogate should always be evaluated by its fidelity $R^2(\hat{g}, \hat{f})$, *not* its accuracy against the true labels. A surrogate can perfectly mimic a poor model , that does not make the model's logic good.
+
+```{r surrogate, fig.cap="Global surrogate decision tree. The tree approximates the Random Forest's decisions using a pruned CART tree. Fidelity is reported as the R-squared between surrogate and black-box predictions."}
+surr_obj <- interpret(fit_rf_reg, data_reg, method = "surrogate",
+                      spec = list(cp = 0.01))
+plot(surr_obj)
+```
+
+## Feature Interaction Strength
+
+**Theory.** The H-statistic [@FriedmanPopescu2008] quantifies the proportion of a feature pair's joint effect that is not explained by the sum of their individual main effects , a formal interaction measure derived from partial dependence functions:
+
+$$
+H_{jk}^2
+= \frac{\sum_{i=1}^n \bigl[
+    \hat{f}_{jk}(x_{ij}, x_{ik})
+  - \hat{f}_j(x_{ij})
+  - \hat{f}_k(x_{ik})
+  \bigr]^2}
+{\sum_{i=1}^n \hat{f}_{jk}^2(x_{ij}, x_{ik})}
+$$
+
+$H_{jk} = 0$ indicates that the joint effect is fully decomposable into main effects (no interaction); $H_{jk} = 1$ indicates that the entire joint effect is due to interaction with no main-effect components.
+
+The total interaction strength of feature $j$ with all other features is the complement of the main-effect proportion: $$
+H_j^2
+= 1 - \frac{\sum_i \hat{f}_j^2(x_{ij})}{\sum_i \hat{f}^2(\mathbf{x}_i)}
+$$
+
+```{r interaction, eval=FALSE}
+int_obj <- interpret(fit_rf_reg, data_reg, method = "interaction")
+plot(int_obj)
+```
+
+## Ceteris Paribus Profiles
+
+**Theory.** A ceteris-paribus (CP) profile , also called a prediction profile or what-if curve , traces the prediction for a *specific observation* as one feature is varied while all others are held at their observed values:
+
+$$
+h_j^{(i)}(z)
+= \hat{f}(x_{i1}, \ldots, x_{i,j-1},\; z,\; x_{i,j+1}, \ldots, x_{ip})
+$$
+
+This is identical to an ICE curve for observation $i$; the difference is interpretive. ICE plots compare heterogeneity across many observations; CP profiles are used for counterfactual analysis of a single case: "what would happen to this patient's predicted risk if their glucose level were 50 points lower?"
+
+```{r profile, fig.cap="Ceteris-paribus profiles for observation 5. Each panel shows how the predicted birth weight changes as one feature is varied, with all other features held at their observed values for this observation."}
+cp_obj <- interpret(fit_rf_reg, data_reg,
+                    method  = "ceteris_paribus",
+                    newdata = data_reg[5, , drop = FALSE],
+                    features = c("lwt", "age", "smoke"))
+plot(cp_obj)
+```
+
+## Calibration Analysis
+
+**Theory.** Probability calibration [@Niculescu2005] assesses whether predicted probabilities are numerically faithful to empirical frequencies. The reliability diagram bins predictions into $M$ equal- frequency intervals and plots $(\text{mean predicted prob.}, \text{observed fraction})$ for each bin. Perfect calibration falls on the diagonal.
+
+::: callout-note
+## Calibration vs. discrimination
+
+A model can have excellent AUC (it ranks patients correctly) but be severely miscalibrated (it assigns systematically wrong probabilities). Conversely, a well-calibrated model may have mediocre AUC. For risk communication and decision support, both properties matter: discrimination determines whether the model distinguishes cases from controls; calibration determines whether the stated probability is trustworthy as a number (e.g., "this patient has a 78% predicted risk").
+:::
+
+```{r calibration, fig.cap="Calibration curve for a Random Forest classifier on the Pima diabetes dataset. Points on the diagonal indicate perfect calibration. Points above indicate underconfidence; points below indicate overconfidence."}
+fit_rf_cls <- fit(formula_cls, data = data_cls, model = "ranger",
+                  spec = list(num.trees = 300, seed = 42))
+
+cal_obj <- interpret(fit_rf_cls, data_cls, method = "calibration",
+                     type = "prob", pos_level = "Yes", bins = 10)
+plot(cal_obj, style = "curve")
+```
+
+With a comprehensive interpretation of the selected model in hand, we can move from prediction to causal inference , asking not just what the model predicts, but what would happen if we intervened on a treatment variable.
+
+# Plug-In G-Computation {#sec-estimate}
+
+## Theory
+
+G-computation [@Robins1986; @Snowden2011] is a standardisation-based plug-in estimator of the *g-formula* (Robins' generalised formula). Under three identifiability assumptions , **consistency** ($Y_i^a = Y_i$ when $A_i = a$), **conditional exchangeability** ($Y^a \perp\!\!\!\perp A \mid \mathbf{X}$, no unmeasured confounding), and **positivity** ($P(A = a \mid \mathbf{X} = \mathbf{x}) > 0$ for all $\mathbf{x}$ in the support) , the potential-outcome mean under treatment $a$ is identified as [@Pearl2009; @Snowden2011]:
+
+$$
+\psi^a
+= \mathbb{E}_{\mathbf{X}}\!\bigl[\mathbb{E}[Y \mid A = a, \mathbf{X}]\bigr]
+= \int \mathbb{E}[Y \mid A = a, \mathbf{x}]\;dP(\mathbf{x})
+$$
+
+The plug-in estimator replaces $\mathbb{E}[Y \mid A, \mathbf{X}]$ with a fitted regression model $\hat{f}$ and standardises over the empirical covariate distribution:
+
+$$
+\hat{\psi}^a
+= \frac{1}{n}\sum_{i=1}^n \hat{f}(a, \mathbf{x}_i)
+$$
+
+Four estimands are supported:
+
+| Estimand | Formula | Population |
+|------------------------|------------------------|------------------------|
+| ATE | $\hat{\psi}^1 - \hat{\psi}^0$ | All observations |
+| ATT | $n_1^{-1}\sum_{i: A_i=1}[\hat{f}(1,\mathbf{x}_i) - \hat{f}(0,\mathbf{x}_i)]$ | Treated only |
+| CATE | $\hat{f}(1,\mathbf{x}) - \hat{f}(0,\mathbf{x})$ | As a function of $\mathbf{x}$ |
+| IATE | CATE evaluated at each observed $\mathbf{x}_i$ | Individualised |
+
+Uncertainty is quantified via normal approximation or bootstrap resampling. The use of flexible machine learning models for $\hat{f}$ relaxes parametric assumptions on the outcome surface.
+
+::: callout-important
+## Causal assumptions are not software guarantees
+
+G-computation produces a *causal* estimate only when the three identifiability assumptions hold. The software cannot verify conditional exchangeability (no unmeasured confounding) , this is a substantive, domain-specific judgment. Similarly, the plug-in estimator can be biased if the outcome model is misspecified. Doubly robust estimators (e.g., augmented IPW, TMLE) can provide some protection against outcome-model misspecification but are outside the current scope of **funcml**.
+:::
+
+## R Code
+
+```{r estimate-setup}
+data_causal       <- data_reg
+data_causal$smoke <- factor(data_causal$smoke,
+                            levels = c(0, 1),
+                            labels = c("non_smoker", "smoker"))
+```
+
+```{r estimate-ate}
+ate_obj <- estimate(
+  data      = data_causal,
+  formula   = birth_weight_g ~ smoke + age + lwt + race + ptl + ht + ui + ftv,
+  model     = "ranger",
+  treatment = "smoke",
+  estimand  = "ATE",
+  interval  = "bootstrap",
+  n_boot    = 200,
+  seed      = 42
+)
+ate_obj
+```
+
+```{r estimate-att}
+att_obj <- estimate(
+  data      = data_causal,
+  formula   = birth_weight_g ~ smoke + age + lwt + race + ptl + ht + ui + ftv,
+  model     = "ranger",
+  treatment = "smoke",
+  estimand  = "ATT",
+  interval  = "bootstrap",
+  n_boot    = 200,
+  seed      = 42
+)
+att_obj
+```
+
+```{r estimate-cate}
+cate_obj <- estimate(
+  data      = data_causal,
+  formula   = birth_weight_g ~ smoke + age + lwt + race + ptl + ht + ui + ftv,
+  model     = "ranger",
+  treatment = "smoke",
+  estimand  = "CATE",
+  newdata   = data_causal,
+  seed      = 42
+)
+head(cate_obj$estimates)
+```
+
+The preceding sections have introduced each component of the framework in isolation. The next section brings them together in a single, coherent analysis.
+
+# End-to-End Workflow {#sec-e2e}
+
+This section demonstrates a complete analysis of the Pima diabetes dataset, proceeding through every stage of the **funcml** workflow in sequence: baseline benchmarking, tuning, interpretation, and calibration.
+
+## Step 1: Baseline Benchmark
+
+We begin by comparing five learners under the same 5-fold CV design and three complementary metrics , accuracy, AUC, and log-loss. No hyperparameter tuning is applied at this stage; we use defaults.
+
+```{r e2e-compare}
+cmp_cls <- compare_learners(
+  data       = data_cls,
+  formula    = formula_cls,
+  models     = c("glm", "rpart", "ranger", "gbm", "xgboost"),
+  resampling = cv(v = 5, seed = 42),
+  metrics    = c("accuracy", "auc", "logloss"),
+  type       = "prob",
+  seed       = 42
+)
+cmp_cls
+```
+
+```{r e2e-compare-plot, fig.cap="Baseline learner comparison on the Pima diabetes dataset. The ensemble methods (Random Forest, XGBoost) achieve the highest AUC; the GLM provides the interpretable baseline."}
+plot(cmp_cls)
+```
+
+## Step 2: Tune the Best Learner
+
+XGBoost and Random Forest are the top performers. We tune XGBoost via random search over a moderate grid:
+
+```{r e2e-tune}
+grid_xgb <- expand.grid(
+  nrounds   = c(100, 200),
+  max_depth = c(3, 4, 6),
+  eta       = c(0.05, 0.1)
+)
+
+tuned_xgb <- tune(
+  data       = data_cls,
+  formula    = formula_cls,
+  model      = "xgboost",
+  grid       = grid_xgb,
+  resampling = cv(v = 5, seed = 42),
+  metric     = "auc",
+  search     = "random",
+  n_evals    = 8,
+  type       = "prob",
+  seed       = 42
+)
+
+tuned_xgb$best
+```
+
+## Step 3: Fit the Final Model
+
+```{r e2e-fit}
+fit_final <- fit(
+  formula = formula_cls,
+  data    = data_cls,
+  model   = "xgboost",
+  spec    = as.list(tuned_xgb$best[1, ])
+)
+fit_final
+```
+
+## Step 4: Global Interpretation
+
+```{r e2e-permute, fig.cap="Permutation importance for the tuned XGBoost classifier on the diabetes dataset. Plasma glucose (glu) dominates; body mass index (bmi) and diabetes pedigree (ped) are next."}
+perm_cls <- interpret(fit_final, data_cls,
+                      method = "permute",
+                      metric = "auc",
+                      type   = "prob",
+                      nsim   = 20,
+                      seed   = 42)
+plot(perm_cls)
+```
+
+```{r e2e-pdp, fig.cap="Partial dependence of predicted diabetes probability on plasma glucose. Risk increases sharply above approximately 125 mg/dL."}
+pdp_glu <- interpret(fit_final, data_cls,
+                     method   = "pdp",
+                     features = "glu",
+                     type     = "prob")
+plot(pdp_glu)
+```
+
+```{r e2e-ale, fig.cap="ALE for plasma glucose concentration. Compared to the PDP, the ALE is less influenced by the marginal distribution, providing a cleaner effect estimate."}
+ale_glu <- interpret(fit_final, data_cls,
+                     method   = "ale",
+                     features = "glu",
+                     type     = "prob")
+plot(ale_glu)
+```
+
+## Step 5: Local Explanation for a High-Risk Patient
+
+```{r e2e-shap, fig.cap="SHAP waterfall for the patient predicted at highest risk. High glucose and BMI drive the prediction above the population baseline; low age partially offsets this."}
+high_risk <- data_cls[which.max(
+  predict(fit_final, data_cls, type = "prob")[, "Yes"]
+), , drop = FALSE]
+
+shap_hr <- interpret(fit_final, data_cls,
+                     method  = "shap",
+                     newdata = high_risk,
+                     type    = "prob",
+                     nsim    = 50, seed = 42)
+plot(shap_hr, kind = "waterfall")
+```
+
+## Step 6: Calibration Check
+
+```{r e2e-calibration, fig.cap="Calibration curve for the tuned XGBoost classifier. Points close to the diagonal indicate well-calibrated probability estimates."}
+cal_final <- interpret(fit_final, data_cls,
+                       method    = "calibration",
+                       type      = "prob",
+                       pos_level = "Yes",
+                       bins      = 10)
+plot(cal_final, style = "curve")
+```
+
+# Discussion {#sec-discussion}
+
+## Design Boundaries
+
+**funcml** makes four deliberate design choices that define its scope and should be understood as principled tradeoffs rather than oversights.
+
+*Preprocessing is external.* The absence of built-in imputation, encoding, and scaling keeps the modeling API transparent: the data passed to `fit()` is exactly the data being modeled. Users who need preprocessing graphs or automated feature engineering pipelines can combine **funcml** with base R utilities or dedicated preprocessing tools [@Binder2021; @tidymodels2019].
+
+*S3 over R6.* The choice of conventional S3 objects over the R6 reference semantics used by `mlr3` [@Lang2019] prioritises accessibility and conventional R ergonomics. For highly modular workflow engineering or dynamic pipeline construction, R6-based systems are more appropriate.
+
+*Tabular supervised learning.* The learner registry covers a broad range of tabular methods, but deep learning, time-series forecasting, and unsupervised methods are outside the current scope.
+
+*Plug-in causal estimation, not a full causal framework.* The `estimate()` function implements g-computation under the stated identifiability assumptions. The software reduces the implementation barrier; it does not verify the assumptions. Doubly-robust estimators and sensitivity analyses remain the analyst's responsibility.
+
+## Comparison with Existing Frameworks
+
+Table [-@tbl-comparison] positions **funcml** relative to major R machine learning frameworks.
+
+| Dimension | **funcml** | caret | mlr3 | tidymodels |
+|---------------|---------------|---------------|---------------|---------------|
+| API paradigm | 6 compact verbs | Unified interface | R6 task/learner system | Tidy workflow recipes |
+| Formula-native | Yes | Partial | Via `mlr3` tasks | Via formulas or `recipes` |
+| Preprocessing | External | Internal | Via `mlr3pipelines` | Via `recipes` |
+| Interpretation | 14 native methods | Via `vip`, `DALEX` | Via `iml`, `DALEX` | Via `vip`, `DALEX` |
+| Causal estimation | Native (g-computation) | None | None | None |
+| Object system | S3 | S3 | R6 | S3/R6 |
+| Primary aim | Compact ML | Unified modeling | General ML systems | Tidy ML |
+
+: Framework comparison. {#tbl-comparison}
+
+## Future Directions
+
+Natural extensions to **funcml** include: (1) richer benchmarking summaries with statistical comparison procedures (Bayesian signed rank tests); (2) Bayesian optimisation or multi-fidelity search strategies for tuning; (3) doubly robust and targeted maximum likelihood estimators for causal inference; (4) improved multi-core parallelism for interpretation methods; and (5) probabilistic calibration correction (Platt scaling, isotonic regression) as a post-processing step.
+
+# Conclusion {#sec-conclusion}
+
+This tutorial presented **funcml** as a compact, formula-first machine learning framework for R. We introduced the package's design philosophy , preprocessing-outside, explicit inputs, stable S3 contracts , and demonstrated its full pipeline from data preparation through model fitting, resampling-based evaluation, hyperparameter tuning, learner comparison, interpretation, and plug-in causal estimation.
+
+For each of the 23 learners in the registry we presented the governing statistical equations, key assumptions, hyperparameter landscape, and reproducible R code. For each of the 14 model-agnostic interpretation methods we presented the mathematical definition, assumptions, limitations, and worked examples. The end-to-end example in @sec-e2e showed how these components combine into a coherent applied analysis.
+
+The package's core contribution is software unification: a consistent set of verbs, a stable object hierarchy, and integrated interpretation and causal estimation, all accessible through the same formula-based interface that R users already know. This compactness reduces the cognitive overhead of applied machine learning workflows without sacrificing methodological coverage.
+
+**funcml** is freely available under the GPL-3 license at <https://github.com/ielbadisy/funcml>.
+
+# Software {.unnumbered}
+
+```{r session-info}
+sessionInfo()
+```
+
+# References {.unnumbered}
+
+::: {#refs}
+:::
