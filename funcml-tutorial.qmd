@@ -153,37 +153,44 @@ library(funcml)
 data(package = "funcml")
 ```
 
-Throughout this tutorial we use three representative datasets that together cover the three main supervised learning tasks.
+Throughout this tutorial we use the heart disease dataset in three analysis views that cover regression, binary classification, and multiclass classification.
 
-**Birthweight (regression).** The `birthweight` dataset [@HosmerLemeshow1989] contains 189 mother–infant pairs. The outcome is birth weight in grams (`birth_weight_g`); predictors include maternal age, pre-pregnancy weight, race, smoking status, and obstetric history.
+**Heart Disease (regression view).** The `heartdisease` dataset contains 303 patient records. For regression examples, we model maximum heart rate (`maximum_hr`) from demographic and clinical predictors.
 
 ```{r data-reg}
-data_reg   <- birthweight
-formula_reg <- birth_weight_g ~ age + lwt + race + smoke + ptl + ht + ui + ftv
+data_heart <- heartdisease
+data_heart$sex <- factor(data_heart$sex)
+data_heart$chest_pain <- factor(data_heart$chest_pain)
+data_heart$blood_sugar <- factor(data_heart$blood_sugar,
+                                 levels = c(FALSE, TRUE),
+                                 labels = c("normal", "high"))
+data_heart$exercise_induced_angina <- factor(data_heart$exercise_induced_angina)
+data_heart$heart_disease <- factor(data_heart$heart_disease, levels = c("No", "Yes"))
+
+data_reg <- data_heart
+formula_reg <- maximum_hr ~ age + sex + chest_pain + bp + cholesterol +
+  blood_sugar + exercise_induced_angina + heart_disease
 dim(data_reg)
 ```
 
-**Pima Diabetes (binary classification).** The `pimadiabetes` dataset [@Smith1988] contains 532 patients from the Pima Indian Diabetes Database. The outcome is a diabetes diagnosis indicator (`diabetes`; `"Yes"` / `"No"`). We use the pre-specified training partition and discard the split indicator.[^1]
-
-[^1]: The original Pima Indians dataset was collected by the National Institute of Diabetes and Digestive and Kidney Diseases. Only female patients aged at least 21 years were included.
+**Heart Disease (binary classification view).** For classification examples, the same heart dataset is used to predict the binary diagnosis (`heart_disease`; `"No"` / `"Yes"`).
 
 ```{r data-cls}
-data_cls   <- pimadiabetes[pimadiabetes$split == "train", ]
-data_cls   <- data_cls[, setdiff(names(data_cls), "split")]
-formula_cls <- diabetes ~ npreg + glu + bp + skin + bmi + ped + age
+data_cls <- data_heart
+formula_cls <- heart_disease ~ age + sex + chest_pain + bp + cholesterol +
+  blood_sugar + maximum_hr + exercise_induced_angina
 dim(data_cls)
-table(data_cls$diabetes)
+table(data_cls$heart_disease)
 ```
 
-**Thyroid Function (multiclass).** The `newthyroid` dataset contains 215 patients classified as normal (1), hyperthyroid (2), or hypothyroid (3) based on five thyroid laboratory measurements.
+**Heart Disease (multiclass view).** For multiclass examples, the same heart dataset is recast to predict chest-pain category from the remaining patient features.
 
 ```{r data-mc}
-data_mc   <- newthyroid
-data_mc$class <- factor(data_mc$class)
-formula_mc <- class ~ t3_resin_uptake + total_serum_thyroxin +
-  total_serum_triiodothyronine + basal_tsh + max_abs_tsh_diff
+data_mc <- data_heart
+formula_mc <- chest_pain ~ age + sex + bp + cholesterol + blood_sugar +
+  maximum_hr + exercise_induced_angina + heart_disease
 dim(data_mc)
-table(data_mc$class)
+table(data_mc$chest_pain)
 ```
 
 With the package loaded and data prepared, we next describe how these pieces fit together into a coherent analysis pipeline.
@@ -192,29 +199,8 @@ With the package loaded and data prepared, we next describe how these pieces fit
 
 The **funcml** pipeline flows from raw data through a fitted model to performance assessment, interpretation, and causal estimation. Each stage corresponds to one of the six top-level verbs introduced in @sec-intro.
 
-```{r workflow-diagram, echo=FALSE, fig.cap="The complete funcml analysis pipeline. Arrows indicate data flow; every stage returns a structured S3 object that feeds the next.", fig.height=2.2, fig.width=8}
-stages <- data.frame(
-  x     = c(0.8, 2.5, 4.2, 5.9, 7.6, 9.3),
-  label = c("Data", "fit()", "evaluate()\ntune()", "compare_\nlearners()", "interpret()", "estimate()"),
-  type  = c("data", "core", "core", "core", "interp", "causal")
-)
-cols <- c(data = "#6baed6", core = "#2171b5", interp = "#238b45", causal = "#8c510a")
-
-ggplot(stages, aes(x, 0)) +
-  geom_tile(aes(fill = type), width = 1.35, height = 0.55, color = "white", linewidth = 1.2) +
-  geom_text(aes(label = label), size = 2.85, color = "white", fontface = "bold", lineheight = 0.88) +
-  annotate("segment",
-           x    = c(1.48, 3.18, 4.88, 6.58, 8.28),
-           xend = c(1.82, 3.52, 5.22, 6.92, 8.62),
-           y = 0, yend = 0,
-           arrow = arrow(length = unit(0.18, "cm"), type = "closed"),
-           color = "gray40", linewidth = 0.7) +
-  scale_fill_manual(values = cols) +
-  scale_y_continuous(limits = c(-0.5, 0.5)) +
-  scale_x_continuous(limits = c(0, 10.1)) +
-  theme_void() +
-  theme(legend.position = "none",
-        plot.margin = margin(4, 4, 4, 4))
+```{r workflow-diagram, echo=FALSE, fig.cap="Core funcml workflow.", out.width="80%"}
+knitr::include_graphics("funcml_workflow.png")
 ```
 
 The package follows a **preprocessing-outside** design: data passed to any `funcml` verb is exactly the data that will be modelled. There are no hidden transformations, no formula preprocessing pipelines, and no implicit encoding steps. This transparency is deliberate , it keeps the function arguments self-documenting and avoids hidden state that can cause silent errors between training and prediction.[^2]
@@ -268,19 +254,96 @@ where $\kappa(i)$ maps observation $i$ to its fold and $\hat{f}^{-\kappa(i)}$ is
 
 **Time-series cross-validation** respects the temporal order of observations by expanding or rolling the training window. Fold $k$ trains on $\{1, \ldots, t_k\}$ and evaluates on $\{t_k+1, \ldots, t_k+h\}$ for an assessment horizon $h$, preventing future data from informing past predictions.
 
-```{r cv-diagram, echo=FALSE, fig.cap="Schematic of 5-fold cross-validation. Each row is one fold iteration: grey tiles are training observations, blue tiles are held-out validation observations.", fig.height=2.4, fig.width=6.5}
-n_obs  <- 20
-n_fold <- 5
-fold_id <- rep(1:n_fold, length.out = n_obs)
-df <- expand.grid(fold = 1:n_fold, obs = 1:n_obs)
-df$role <- ifelse(df$fold == df$obs %% n_fold + 1, "Validation", "Training")
-ggplot(df, aes(x = obs, y = fold, fill = role)) +
-  geom_tile(color = "white", linewidth = 0.5) +
-  scale_fill_manual(values = c(Training = "#bdc9e1", Validation = "#2171b5")) +
-  scale_y_reverse(breaks = 1:n_fold, labels = paste("Fold", 1:n_fold)) +
-  labs(x = "Observation index", y = NULL, fill = NULL) +
-  theme_minimal(base_size = 10) +
-  theme(legend.position = "bottom", panel.grid = element_blank())
+```{r kfold-diagram, echo=FALSE, fig.cap="In each fold, one block is held out while the model is trained on the remaining blocks."}
+fold_df <- do.call(rbind, lapply(1:5, function(k) {
+  data.frame(fold  = paste0("Iteration ", k),
+             block = paste0("Fold ", 1:5),
+             set   = ifelse(1:5 == k, "Validation", "Training"))
+}))
+fold_df$fold  <- factor(fold_df$fold,  levels = rev(paste0("Iteration ", 1:5)))
+fold_df$block <- factor(fold_df$block, levels = paste0("Fold ", 1:5))
+
+ggplot(fold_df, aes(block, fold, fill = set)) +
+  geom_tile(colour = "white", linewidth = 0.8, height = 0.8) +
+  geom_text(aes(label = ifelse(set == "Validation", "test", "train")),
+            colour = "white", fontface = "bold", size = 3.4) +
+  scale_fill_manual(values = c(Training = "#2166AC", Validation = "#D6604D")) +
+  labs(x = NULL, y = NULL, fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
+```
+
+```{r resampling-overview-diagram, echo=FALSE, fig.cap="Holdout and 5-fold CV split the same observations differently."}
+resamp_df <- dplyr::bind_rows(
+  data.frame(row = "Holdout 80/20", obs = 1:20,
+             set = ifelse(1:20 %in% 17:20, "Assessment", "Analysis")),
+  do.call(rbind, lapply(1:5, function(k)
+    data.frame(row = paste0("Fold ", k), obs = 1:20,
+               set = ifelse(1:20 %in% ((k-1)*4+1):(k*4), "Assessment", "Analysis"))))
+)
+resamp_df$row <- factor(resamp_df$row,
+  levels = rev(c("Holdout 80/20", paste0("Fold ", 1:5))))
+
+ggplot(resamp_df, aes(obs, row, fill = set)) +
+  geom_tile(colour = "white", linewidth = 0.35, height = 0.78) +
+  scale_fill_manual(values = c(Analysis = "#2E86C1", Assessment = "#E67E22")) +
+  scale_x_continuous(breaks = c(1,5,10,15,20), expand = c(0.01,0.01)) +
+  labs(x = "Patient index", y = NULL, fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
+```
+
+```{r resampling-decision-diagram, echo=FALSE, fig.cap="Choosing a resampling design starts from the data structure."}
+dot <- "
+digraph resampling {
+  graph [layout=dot, rankdir=LR, bgcolor='transparent']
+  node [shape=box, style='rounded,filled', fontname=Helvetica,
+        color=white, fontcolor=white, penwidth=1.2]
+  edge [color='#555555', arrowsize=0.8, fontname=Helvetica, fontsize=10]
+  start    [label='Data structure?',          fillcolor='#1B4F72']
+  iid      [label='Independent records',      fillcolor='#2E86C1']
+  cluster  [label='Repeated patients/sites',  fillcolor='#2E86C1']
+  time     [label='Calendar time matters',    fillcolor='#2E86C1']
+  tune     [label='Tuning on same dataset?',  fillcolor='#566573']
+  holdout  [label='Holdout (large n)',         fillcolor='#27AE60']
+  kfold    [label='K-fold CV (small/mod n)',   fillcolor='#27AE60']
+  group    [label='Group/site CV',             fillcolor='#E67E22']
+  temporal [label='Temporal split',            fillcolor='#E67E22']
+  nested   [label='Nested CV',                 fillcolor='#C0392B']
+  start -> iid; start -> cluster; start -> time
+  iid -> tune [label='if model selection']
+  iid -> holdout [label='large n']
+  iid -> kfold   [label='limited n']
+  cluster -> group; time -> temporal; tune -> nested
+}"
+DiagrammeR::grViz(dot)
+```
+
+| Design | Use when | Main limitation |
+|:-------|:---------|:----------------|
+| Random split | Independent, exchangeable records | Weak for temporal health data |
+| K-fold CV | Small to moderate datasets | Must repeat preprocessing per fold |
+| Nested CV | Tuning + performance on same data | More computation |
+| Temporal split | EHR, registry, claims over time | Needs enough historical data |
+| Geographic/site split | Transportability question | Site mix may confound |
+| External validation | Deployment readiness | Requires independent cohort |
+
+```{r temporal-site-diagram, echo=FALSE, fig.cap="Temporal validation tests future patients; site validation tests transportability."}
+temporal <- data.frame(panel = "Temporal split", x = 1:12, y = 2,
+  set = c(rep("Train: earlier patients",7), rep("Temporal test: future patients",5)))
+site <- data.frame(panel = "Site split", x = 1:12, y = 1,
+  set = c(rep("Train sites A/B",8), rep("External site C",4)))
+split_df <- rbind(temporal, site)
+
+ggplot(split_df, aes(x, panel, fill = set)) +
+  geom_tile(colour = "white", linewidth = 0.4, height = 0.65) +
+  scale_fill_manual(values = c("Train: earlier patients"="#2E86C1",
+    "Temporal test: future patients"="#D6604D",
+    "Train sites A/B"="#27AE60", "External site C"="#8E44AD")) +
+  scale_x_continuous(breaks = NULL, expand = c(0.01,0.01)) +
+  labs(x = NULL, y = NULL, fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(), legend.position = "bottom")
 ```
 
 ## funcml Resampling Constructors
@@ -765,7 +828,7 @@ A large penalty forces $f_j$ toward a straight line; a small penalty allows $f_j
 [^12]: GAMs cannot directly model non-additive interactions unless interaction smooths $f_{jk}(x_j, x_k)$ are explicitly included. Thin-plate regression splines with `te()` or `ti()` terms in `mgcv` provide this capability.
 
 ```{r gam-reg}
-formula_gam <- birth_weight_g ~ age + lwt
+formula_gam <- maximum_hr ~ age + bp
 fit_gam <- fit(formula_gam, data = data_reg, model = "gam")
 fit_gam
 ```
@@ -1076,7 +1139,7 @@ The **Maximum Calibration Error** (MCE) is the worst-case gap: $$
 $$
 
 ```{r metrics-demo}
-truth <- data_reg$birth_weight_g
+truth <- data_reg$maximum_hr
 pred  <- predict(fit_ranger, newdata = data_reg)
 
 rmse(truth, pred)
@@ -1117,7 +1180,7 @@ eval_cls
 
 The `plot()` method displays the fold-level metric distribution, providing a visual sense of estimator variance across folds:
 
-```{r eval-plot, fig.cap="Cross-validated RMSE distribution across 5 folds for a Random Forest on the birthweight dataset. The point and interval show the mean and 95% confidence interval across folds."}
+```{r eval-plot, fig.cap="Cross-validated RMSE distribution across 5 folds for a Random Forest on the heart disease dataset. The point and interval show the mean and 95% confidence interval across folds."}
 plot(eval_reg)
 ```
 
@@ -1206,6 +1269,34 @@ plot(tune_rpart)
 
 ## Nested Cross-Validation
 
+```{r nested-cv-diagram, echo=FALSE, fig.cap="Nested CV separates model selection from performance estimation."}
+outer <- data.frame(x = 1:5, y = 3,
+  label = paste0("Outer\n", 1:5),
+  set   = c("Test","Train","Train","Train","Train"))
+inner <- data.frame(x = 2:5, y = 1.4,
+  label = c("Inner\nvalid","Inner\ntrain","Inner\ntrain","Inner\ntrain"),
+  set   = c("Validation","Train","Train","Train"))
+cv_df       <- rbind(outer, inner)
+
+ggplot(cv_df, aes(x, y, fill = set)) +
+  geom_tile(width = 0.85, height = 0.8, colour = "white", linewidth = 0.8) +
+  geom_text(aes(label = label), colour = "white", fontface = "bold",
+            size = 3.2, lineheight = 0.85) +
+  annotate("text", x = 3,   y = 3.7, fontface = "bold", size = 3.5,
+           label = "Outer loop: one test fold is untouched") +
+  annotate("text", x = 3.5, y = 2.05, fontface = "bold", size = 3.5,
+           label = "Inner loop: tune using only outer-training data") +
+  annotate("segment", x = 2, xend = 2, y = 2.55, yend = 1.85,
+           arrow = grid::arrow(length = grid::unit(0.15,"cm")),
+           colour = "#555555") +
+  scale_fill_manual(values = c(Train="#2E86C1", Validation="#E67E22",
+                               Test="#C0392B")) +
+  coord_cartesian(xlim = c(0.4,5.6), ylim = c(0.7,4.0)) +
+  labs(x = NULL, y = NULL, fill = NULL) +
+  theme_void(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
 ```{r nested-tune}
 nested <- tune(
   data             = data_reg,
@@ -1240,7 +1331,7 @@ cmp <- compare_learners(
 cmp
 ```
 
-```{r compare-plot, fig.cap="Learner comparison by cross-validated RMSE on the birthweight regression dataset. Lower is better. Error bars show the 95% confidence interval across folds."}
+```{r compare-plot, fig.cap="Learner comparison by cross-validated RMSE on the heart disease regression view. Lower is better. Error bars show the 95% confidence interval across folds."}
 plot(cmp)
 ```
 
@@ -1264,7 +1355,7 @@ The `interpret()` function provides a unified gateway to fourteen model-agnostic
 | **Local** (individual prediction) | ICE, LIME, Local model, SHAP, Ceteris paribus |
 | **Diagnostic** | Calibration |
 
-All methods return a structured S3 object with `print()`, `summary()`, and `plot()` methods. We use a Random Forest on the birthweight data as the black-box model throughout.
+All methods return a structured S3 object with `print()`, `summary()`, and `plot()` methods. We use a Random Forest on the heart disease data as the black-box model throughout.
 
 ```{r interp-fit}
 fit_rf_reg <- fit(formula_reg, data = data_reg, model = "ranger",
@@ -1334,9 +1425,9 @@ This Monte Carlo approximation substitutes the observed values of all other feat
 The PDP averages over the observed marginal distribution of $\mathbf{x}_{-j}$, which can include combinations $(z, \mathbf{x}_{-j})$ that never occur in the data when features are correlated. For example, if height and weight are strongly correlated, a PDP might average predictions for (height = 200cm, weight = 40kg) , a biologically impossible combination. ALE plots (@sec-ale) resolve this by conditioning on *local* neighbourhoods rather than the global marginal.
 :::
 
-```{r pdp, fig.cap="Partial dependence of predicted birth weight on maternal pre-pregnancy weight (lwt). The rug marks show the distribution of observed lwt values."}
+```{r pdp, fig.cap="Partial dependence of predicted maximum heart rate on resting blood pressure. The rug marks show the distribution of observed blood-pressure values."}
 pdp_obj <- interpret(fit_rf_reg, data_reg, method = "pdp",
-                     features = "lwt")
+                     features = "bp")
 plot(pdp_obj)
 ```
 
@@ -1356,9 +1447,9 @@ The diagnostic power of ICE lies in heterogeneity. If all ICE lines are parallel
 
 [^20]: *Centred ICE* (c-ICE) subtracts each curve's value at a reference point $z_0$ (typically the minimum of $x_j$), making it easier to compare the *shape* of the effect across observations by removing baseline differences.
 
-```{r ice, fig.cap="ICE curves for maternal pre-pregnancy weight (lwt). Each grey line is one observation; the blue line is the partial dependence mean. Non-parallel lines indicate interaction effects."}
+```{r ice, fig.cap="ICE curves for resting blood pressure. Each grey line is one observation; the blue line is the partial dependence mean. Non-parallel lines indicate interaction effects."}
 ice_obj <- interpret(fit_rf_reg, data_reg, method = "ice",
-                     features = "lwt")
+                     features = "bp")
 plot(ice_obj)
 ```
 
@@ -1389,9 +1480,9 @@ where $N_k = \{i : x_{ij} \in [z_{k-1}, z_k]\}$ is the set of observations falli
 
 [^21]: ALE plots measure the *unconfounded* main effect of a feature by removing the effect of correlated features via conditioning. They are consistent estimators of the true partial effect under correlation, whereas PDP is not [@ApleyZhu2020].
 
-```{r ale, fig.cap="Accumulated local effects for maternal pre-pregnancy weight (lwt). The y-axis shows the centered, unconfounded partial effect on predicted birth weight."}
+```{r ale, fig.cap="Accumulated local effects for resting blood pressure. The y-axis shows the centered, unconfounded partial effect on predicted maximum heart rate."}
 ale_obj <- interpret(fit_rf_reg, data_reg, method = "ale",
-                     features = "lwt")
+                     features = "bp")
 plot(ale_obj)
 ```
 
@@ -1413,9 +1504,10 @@ In **funcml**, LIME uses a local weighted linear regression where weights are de
 
 The key idea is that while $\hat{f}$ may be globally non-linear and complex, it is often *locally linear* in a small neighbourhood around any query point. The local linear model $\hat{g}$ is the tangent-plane approximation of $\hat{f}$ at $\mathbf{x}^*$.
 
-```{r lime, fig.cap="LIME explanation for observation 5 in the birthweight dataset. Positive bars push the prediction up relative to the average; negative bars push it down."}
+```{r lime, fig.cap="LIME explanation for observation 5 in the heart disease dataset. Positive bars push the prediction up relative to the average; negative bars push it down."}
 lime_obj <- interpret(fit_rf_reg, data_reg, method = "lime",
                       newdata = data_reg[5, , drop = FALSE],
+                      features = c("age", "bp", "cholesterol"),
                       k = 3, seed = 42)
 plot(lime_obj)
 ```
@@ -1436,6 +1528,7 @@ The difference between `lime` and `local_model` in **funcml** is subtle: `lime` 
 ```{r local-model, fig.cap="Local surrogate (IML-style) explanation for observation 5. Coefficients are from a lasso fit on the 10 nearest neighbours, weighted by Gower distance."}
 local_obj <- interpret(fit_rf_reg, data_reg, method = "local_model",
                        newdata = data_reg[5, , drop = FALSE],
+                       features = c("age", "bp", "cholesterol"),
                        k = 10, seed = 42)
 plot(local_obj)
 ```
@@ -1548,13 +1641,13 @@ h_j^{(i)}(z)
 = \hat{f}(x_{i1}, \ldots, x_{i,j-1},\; z,\; x_{i,j+1}, \ldots, x_{ip})
 $$
 
-This is identical to an ICE curve for observation $i$; the difference is interpretive. ICE plots compare heterogeneity across many observations; CP profiles are used for counterfactual analysis of a single case: "what would happen to this patient's predicted risk if their glucose level were 50 points lower?"
+This is identical to an ICE curve for observation $i$; the difference is interpretive. ICE plots compare heterogeneity across many observations; CP profiles are used for counterfactual analysis of a single case: "what would happen to this patient's predicted risk if their maximum heart rate were 50 points lower?"
 
-```{r profile, fig.cap="Ceteris-paribus profiles for observation 5. Each panel shows how the predicted birth weight changes as one feature is varied, with all other features held at their observed values for this observation."}
+```{r profile, fig.cap="Ceteris-paribus profiles for observation 5. Each panel shows how predicted maximum heart rate changes as one feature is varied, with all other features held at their observed values for this observation."}
 cp_obj <- interpret(fit_rf_reg, data_reg,
                     method  = "ceteris_paribus",
                     newdata = data_reg[5, , drop = FALSE],
-                    features = c("lwt", "age", "smoke"))
+                    features = c("bp", "age", "cholesterol"))
 plot(cp_obj)
 ```
 
@@ -1568,7 +1661,7 @@ plot(cp_obj)
 A model can have excellent AUC (it ranks patients correctly) but be severely miscalibrated (it assigns systematically wrong probabilities). Conversely, a well-calibrated model may have mediocre AUC. For risk communication and decision support, both properties matter: discrimination determines whether the model distinguishes cases from controls; calibration determines whether the stated probability is trustworthy as a number (e.g., "this patient has a 78% predicted risk").
 :::
 
-```{r calibration, fig.cap="Calibration curve for a Random Forest classifier on the Pima diabetes dataset. Points on the diagonal indicate perfect calibration. Points above indicate underconfidence; points below indicate overconfidence."}
+```{r calibration, fig.cap="Calibration curve for a Random Forest classifier on the heart disease dataset. Points on the diagonal indicate perfect calibration. Points above indicate underconfidence; points below indicate overconfidence."}
 fit_rf_cls <- fit(formula_cls, data = data_cls, model = "ranger",
                   spec = list(num.trees = 300, seed = 42))
 
@@ -1618,18 +1711,16 @@ G-computation produces a *causal* estimate only when the three identifiability a
 ## R Code
 
 ```{r estimate-setup}
-data_causal       <- data_reg
-data_causal$smoke <- factor(data_causal$smoke,
-                            levels = c(0, 1),
-                            labels = c("non_smoker", "smoker"))
+data_causal <- data_reg
 ```
 
 ```{r estimate-ate}
 ate_obj <- estimate(
   data      = data_causal,
-  formula   = birth_weight_g ~ smoke + age + lwt + race + ptl + ht + ui + ftv,
+  formula   = maximum_hr ~ exercise_induced_angina + age + sex + chest_pain +
+    bp + cholesterol + blood_sugar + heart_disease,
   model     = "ranger",
-  treatment = "smoke",
+  treatment = "exercise_induced_angina",
   estimand  = "ATE",
   interval  = "bootstrap",
   n_boot    = 200,
@@ -1638,12 +1729,17 @@ ate_obj <- estimate(
 ate_obj
 ```
 
+```{r estimate-ate-plot, fig.cap="Bootstrap interval for the plug-in average treatment effect estimated with funcml g-computation."}
+plot(ate_obj)
+```
+
 ```{r estimate-att}
 att_obj <- estimate(
   data      = data_causal,
-  formula   = birth_weight_g ~ smoke + age + lwt + race + ptl + ht + ui + ftv,
+  formula   = maximum_hr ~ exercise_induced_angina + age + sex + chest_pain +
+    bp + cholesterol + blood_sugar + heart_disease,
   model     = "ranger",
-  treatment = "smoke",
+  treatment = "exercise_induced_angina",
   estimand  = "ATT",
   interval  = "bootstrap",
   n_boot    = 200,
@@ -1655,9 +1751,10 @@ att_obj
 ```{r estimate-cate}
 cate_obj <- estimate(
   data      = data_causal,
-  formula   = birth_weight_g ~ smoke + age + lwt + race + ptl + ht + ui + ftv,
+  formula   = maximum_hr ~ exercise_induced_angina + age + sex + chest_pain +
+    bp + cholesterol + blood_sugar + heart_disease,
   model     = "ranger",
-  treatment = "smoke",
+  treatment = "exercise_induced_angina",
   estimand  = "CATE",
   newdata   = data_causal,
   seed      = 42
@@ -1669,7 +1766,7 @@ The preceding sections have introduced each component of the framework in isolat
 
 # End-to-End Workflow {#sec-e2e}
 
-This section demonstrates a complete analysis of the Pima diabetes dataset, proceeding through every stage of the **funcml** workflow in sequence: baseline benchmarking, tuning, interpretation, and calibration.
+This section demonstrates a complete analysis of the heart disease dataset, proceeding through every stage of the **funcml** workflow in sequence: baseline benchmarking, tuning, interpretation, and calibration.
 
 ## Step 1: Baseline Benchmark
 
@@ -1688,7 +1785,7 @@ cmp_cls <- compare_learners(
 cmp_cls
 ```
 
-```{r e2e-compare-plot, fig.cap="Baseline learner comparison on the Pima diabetes dataset. The ensemble methods (Random Forest, XGBoost) achieve the highest AUC; the GLM provides the interpretable baseline."}
+```{r e2e-compare-plot, fig.cap="Baseline learner comparison on the heart disease dataset. The ensemble methods (Random Forest, XGBoost) achieve the highest AUC; the GLM provides the interpretable baseline."}
 plot(cmp_cls)
 ```
 
@@ -1733,7 +1830,7 @@ fit_final
 
 ## Step 4: Global Interpretation
 
-```{r e2e-permute, fig.cap="Permutation importance for the tuned XGBoost classifier on the diabetes dataset. Plasma glucose (glu) dominates; body mass index (bmi) and diabetes pedigree (ped) are next."}
+```{r e2e-permute, fig.cap="Permutation importance for the tuned XGBoost classifier on the heart disease dataset. Maximum heart rate, chest pain, and exercise-induced angina are expected to be influential predictors."}
 perm_cls <- interpret(fit_final, data_cls,
                       method = "permute",
                       metric = "auc",
@@ -1743,25 +1840,25 @@ perm_cls <- interpret(fit_final, data_cls,
 plot(perm_cls)
 ```
 
-```{r e2e-pdp, fig.cap="Partial dependence of predicted diabetes probability on plasma glucose. Risk increases sharply above approximately 125 mg/dL."}
-pdp_glu <- interpret(fit_final, data_cls,
+```{r e2e-pdp, fig.cap="Partial dependence of predicted heart-disease probability on maximum heart rate."}
+pdp_hr <- interpret(fit_final, data_cls,
                      method   = "pdp",
-                     features = "glu",
+                     features = "maximum_hr",
                      type     = "prob")
-plot(pdp_glu)
+plot(pdp_hr)
 ```
 
-```{r e2e-ale, fig.cap="ALE for plasma glucose concentration. Compared to the PDP, the ALE is less influenced by the marginal distribution, providing a cleaner effect estimate."}
-ale_glu <- interpret(fit_final, data_cls,
+```{r e2e-ale, fig.cap="ALE for maximum heart rate. Compared to the PDP, the ALE is less influenced by the marginal distribution, providing a cleaner effect estimate."}
+ale_hr <- interpret(fit_final, data_cls,
                      method   = "ale",
-                     features = "glu",
+                     features = "maximum_hr",
                      type     = "prob")
-plot(ale_glu)
+plot(ale_hr)
 ```
 
 ## Step 5: Local Explanation for a High-Risk Patient
 
-```{r e2e-shap, fig.cap="SHAP waterfall for the patient predicted at highest risk. High glucose and BMI drive the prediction above the population baseline; low age partially offsets this."}
+```{r e2e-shap, fig.cap="SHAP waterfall for the patient predicted at highest risk. Clinical features drive the prediction above the population baseline for the highest-risk patient."}
 high_risk <- data_cls[which.max(
   predict(fit_final, data_cls, type = "prob")[, "Yes"]
 ), , drop = FALSE]
