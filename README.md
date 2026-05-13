@@ -4,6 +4,9 @@ This repository contains a self-contained Quarto tutorial for
 [`funcml`](https://github.com/ielbadisy/funcml), a formula-first machine
 learning framework for R.
 
+Read the rendered tutorial online:
+<https://ielbadisy.github.io/funcml-tutorial/>
+
 The tutorial introduces the package's six main workflow verbs:
 
 - `fit()` for model fitting
@@ -21,6 +24,7 @@ diabetes dataset.
 
 - `funcml-tutorial.qmd`: Quarto source for the tutorial.
 - `funcml-tutorial.html`: Rendered HTML version of the tutorial.
+- `index.html`: GitHub Pages entry point that opens the rendered tutorial.
 - `references.bib`: Bibliography used by the Quarto document.
 
 ## Requirements
