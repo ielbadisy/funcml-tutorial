@@ -1,0 +1,378 @@
+---
+title: "Heart Disease Classification Pipeline with funcml"
+subtitle: "From Formula Definition to Exported Results"
+author: "Imad El Badisy"
+date: today
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    colorlinks: true
+    fig-pos: "H"
+    geometry:
+      - margin=1in
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+---
+
+```{r setup}
+library(funcml)
+
+results_dir <- "heartdisease_pipeline_results"
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+
+set.seed(42)
+```
+
+# Objective
+
+This document builds a complete binary classification pipeline using the internal
+`heartdisease` dataset shipped with **funcml**. The target is `heart_disease`
+(`"No"` / `"Yes"`), and the workflow proceeds from an explicit model formula to
+model fitting, resampling-based evaluation, tuning, comparison, interpretation,
+calibration, prediction, and exported results.
+
+# Data
+
+## Load and Prepare
+
+```{r data-prep}
+data_heart <- heartdisease
+
+data_heart$sex <- factor(data_heart$sex)
+data_heart$chest_pain <- factor(data_heart$chest_pain)
+data_heart$blood_sugar <- factor(
+  data_heart$blood_sugar,
+  levels = c(FALSE, TRUE),
+  labels = c("normal", "high")
+)
+data_heart$exercise_induced_angina <- factor(data_heart$exercise_induced_angina)
+data_heart$heart_disease <- factor(
+  data_heart$heart_disease,
+  levels = c("No", "Yes")
+)
+
+data_cls <- data_heart
+str(data_cls)
+table(data_cls$heart_disease)
+```
+
+## Explicit Model Formula
+
+```{r formula}
+formula_cls <- heart_disease ~ age + sex + chest_pain + bp + cholesterol +
+  blood_sugar + maximum_hr + exercise_induced_angina
+
+formula_cls
+```
+
+# Baseline Model
+
+We start with a random forest classifier because it is a strong tabular baseline
+and supports probability prediction.
+
+```{r baseline-fit}
+fit_baseline <- fit(
+  formula = formula_cls,
+  data    = data_cls,
+  model   = "ranger",
+  spec    = list(num.trees = 300, mtry = 3, seed = 42)
+)
+
+fit_baseline
+```
+
+```{r baseline-predictions}
+pred_class <- predict(fit_baseline, newdata = data_cls)
+pred_prob  <- predict(fit_baseline, newdata = data_cls, type = "prob")
+
+predictions <- data.frame(
+  id = seq_len(nrow(data_cls)),
+  truth = data_cls$heart_disease,
+  predicted_class = pred_class,
+  prob_no = pred_prob[, "No"],
+  prob_yes = pred_prob[, "Yes"]
+)
+
+head(predictions)
+```
+
+# Resampling-Based Evaluation
+
+```{r evaluation}
+eval_baseline <- evaluate(
+  data       = data_cls,
+  formula    = formula_cls,
+  model      = "ranger",
+  resampling = cv(v = 5, seed = 42),
+  metrics    = c("accuracy", "auc", "logloss"),
+  type       = "prob",
+  seed       = 42
+)
+
+eval_baseline
+eval_baseline$summary
+```
+
+```{r evaluation-plot, fig.cap="Cross-validated performance for the baseline random forest classifier."}
+plot(eval_baseline)
+```
+
+# Hyperparameter Tuning
+
+```{r tuning}
+grid_ranger <- expand.grid(
+  num.trees = c(100, 200, 300),
+  mtry      = c(2, 3, 5)
+)
+
+tuned_ranger <- tune(
+  data       = data_cls,
+  formula    = formula_cls,
+  model      = "ranger",
+  grid       = grid_ranger,
+  resampling = cv(v = 5, seed = 42),
+  metric     = "auc",
+  type       = "prob",
+  search     = "grid",
+  seed       = 42
+)
+
+tuned_ranger$best
+```
+
+```{r tuning-plot, fig.cap="Ranger tuning results ranked by cross-validated AUC."}
+plot(tuned_ranger)
+```
+
+# Final Model
+
+```{r final-model}
+fit_final <- fit(
+  formula = formula_cls,
+  data    = data_cls,
+  model   = "ranger",
+  spec    = as.list(tuned_ranger$best[1, c("num.trees", "mtry")])
+)
+
+fit_final
+```
+
+```{r final-predictions}
+final_class <- predict(fit_final, newdata = data_cls)
+final_prob  <- predict(fit_final, newdata = data_cls, type = "prob")
+
+final_predictions <- data.frame(
+  id = seq_len(nrow(data_cls)),
+  truth = data_cls$heart_disease,
+  predicted_class = final_class,
+  prob_no = final_prob[, "No"],
+  prob_yes = final_prob[, "Yes"]
+)
+
+head(final_predictions)
+```
+
+# Learner Comparison
+
+```{r comparison}
+cmp_cls <- compare_learners(
+  data       = data_cls,
+  formula    = formula_cls,
+  models     = c("glm", "rpart", "ranger"),
+  resampling = cv(v = 5, seed = 42),
+  metrics    = c("accuracy", "auc", "logloss"),
+  type       = "prob",
+  seed       = 42
+)
+
+cmp_cls
+cmp_cls$results
+```
+
+```{r comparison-plot, fig.cap="Comparison of GLM, CART, and random forest on the same folds."}
+plot(cmp_cls)
+```
+
+# Interpretation
+
+## Variable Importance
+
+```{r importance}
+vip_obj <- interpret(
+  fit_final,
+  data_cls,
+  method = "vip"
+)
+
+vip_obj$result
+```
+
+```{r importance-plot, fig.cap="Model-based variable importance for the final random forest."}
+plot(vip_obj)
+```
+
+## Permutation Importance
+
+```{r permutation}
+perm_obj <- interpret(
+  fit_final,
+  data_cls,
+  method = "permute",
+  metric = "auc",
+  type   = "prob",
+  nsim   = 10,
+  seed   = 42
+)
+
+perm_obj$result
+```
+
+```{r permutation-plot, fig.cap="Permutation importance using AUC as the performance metric."}
+plot(perm_obj)
+```
+
+## Calibration
+
+```{r calibration}
+cal_obj <- interpret(
+  fit_final,
+  data_cls,
+  method    = "calibration",
+  type      = "prob",
+  pos_level = "Yes",
+  bins      = 8
+)
+
+cal_obj$result
+```
+
+```{r calibration-plot, fig.cap="Calibration curve for predicted heart disease probability."}
+plot(cal_obj, style = "curve")
+```
+
+# Optional SHAP Code
+
+SHAP can be informative, but it is intentionally not evaluated here because it is
+computationally expensive during document rendering.
+
+```{r shap-optional, eval=FALSE}
+high_risk <- data_cls[which.max(final_prob[, "Yes"]), , drop = FALSE]
+
+shap_hr <- interpret(
+  fit_final,
+  data_cls,
+  method  = "shap",
+  newdata = high_risk,
+  type    = "prob",
+  nsim    = 50,
+  seed    = 42
+)
+
+plot(shap_hr, kind = "waterfall")
+```
+
+# Export Results
+
+The following chunk writes the dataset, formula, fitted objects, tabular outputs,
+predictions, plots, and session information to `heartdisease_pipeline_results/`.
+
+```{r export-results}
+write_export <- function(x, path) {
+  tab <- tryCatch(
+    {
+      if (!is.data.frame(x)) {
+        x <- as.data.frame(x)
+      }
+      x[] <- lapply(x, function(col) {
+        if (is.list(col)) {
+          vapply(col, function(value) {
+            paste(capture.output(str(value, max.level = 1)), collapse = " ")
+          }, character(1))
+        } else {
+          col
+        }
+      })
+      x
+    },
+    error = function(e) {
+      data.frame(output = capture.output(print(x)))
+    }
+  )
+
+  write.csv(tab, path, row.names = FALSE)
+}
+
+write.csv(data_cls, file.path(results_dir, "heartdisease_classification_data.csv"),
+          row.names = FALSE)
+writeLines(deparse(formula_cls), file.path(results_dir, "model_formula.txt"))
+
+write.csv(predictions, file.path(results_dir, "baseline_predictions.csv"),
+          row.names = FALSE)
+write.csv(final_predictions, file.path(results_dir, "final_predictions.csv"),
+          row.names = FALSE)
+
+write_export(eval_baseline$summary,
+             file.path(results_dir, "baseline_evaluation_summary.csv"))
+write_export(tuned_ranger$results,
+             file.path(results_dir, "tuning_results.csv"))
+write_export(tuned_ranger$best,
+             file.path(results_dir, "best_hyperparameters.csv"))
+write_export(cmp_cls$results,
+             file.path(results_dir, "learner_comparison.csv"))
+write_export(vip_obj$result,
+             file.path(results_dir, "variable_importance.csv"))
+write_export(perm_obj$result,
+             file.path(results_dir, "permutation_importance.csv"))
+write_export(cal_obj$result,
+             file.path(results_dir, "calibration_table.csv"))
+
+saveRDS(fit_baseline, file.path(results_dir, "baseline_fit.rds"))
+saveRDS(eval_baseline, file.path(results_dir, "baseline_evaluation.rds"))
+saveRDS(tuned_ranger, file.path(results_dir, "tuned_ranger.rds"))
+saveRDS(fit_final, file.path(results_dir, "final_fit.rds"))
+saveRDS(cmp_cls, file.path(results_dir, "learner_comparison.rds"))
+saveRDS(vip_obj, file.path(results_dir, "variable_importance.rds"))
+saveRDS(perm_obj, file.path(results_dir, "permutation_importance.rds"))
+saveRDS(cal_obj, file.path(results_dir, "calibration.rds"))
+
+pdf(file.path(results_dir, "baseline_evaluation_plot.pdf"), width = 7, height = 5)
+print(plot(eval_baseline))
+dev.off()
+
+pdf(file.path(results_dir, "tuning_plot.pdf"), width = 7, height = 5)
+print(plot(tuned_ranger))
+dev.off()
+
+pdf(file.path(results_dir, "learner_comparison_plot.pdf"), width = 7, height = 5)
+print(plot(cmp_cls))
+dev.off()
+
+pdf(file.path(results_dir, "variable_importance_plot.pdf"), width = 7, height = 5)
+print(plot(vip_obj))
+dev.off()
+
+pdf(file.path(results_dir, "permutation_importance_plot.pdf"), width = 7, height = 5)
+print(plot(perm_obj))
+dev.off()
+
+pdf(file.path(results_dir, "calibration_plot.pdf"), width = 7, height = 5)
+print(plot(cal_obj, style = "curve"))
+dev.off()
+
+writeLines(capture.output(sessionInfo()),
+           file.path(results_dir, "session_info.txt"))
+
+sort(list.files(results_dir))
+```
+
+# Reuse
+
+The exported `.rds` files preserve the fitted **funcml** objects for later R
+analysis. The `.csv` files are plain tabular outputs for reporting, auditing, or
+sharing outside R. The plot PDFs can be inserted directly into reports or
+presentations.
